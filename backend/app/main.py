@@ -51,7 +51,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
     if not settings.llm_configured:
         logger.warning(
-            "ANTHROPIC_API_KEY is not set: the research agents cannot call Claude until it is added to .env."
+            "%s is not set: the research agents cannot call %s until it is added to .env.",
+            settings.llm_key_name,
+            settings.llm_model,
         )
     yield
     await app.state.run_manager.shutdown()

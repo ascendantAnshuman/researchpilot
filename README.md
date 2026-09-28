@@ -64,13 +64,13 @@ flowchart LR
 | Layer | Technology |
 |---|---|
 | Agents | LangGraph 1.2 (state machine with a conditional Critic → Synthesizer revision loop) |
-| LLM | Anthropic Claude via the official `anthropic` SDK. All calls go through `backend/app/llm.py`: streaming, Pydantic-validated JSON output, retries, token and cost tracking. |
+| LLM | **Google Gemini (free tier)** or **Anthropic Claude**, chosen by `LLM_MODEL`, via the official `google-genai` / `anthropic` SDKs. All calls go through `backend/app/llm.py`: Pydantic-validated JSON output, retries, rate limiting, token and cost tracking. |
 | Backend | Python 3.11, FastAPI, Pydantic v2, SQLAlchemy 2 + SQLite, JWT auth (python-jose, passlib/bcrypt), SSE (sse-starlette) |
 | Retrieval | ChromaDB (persistent), sentence-transformers `all-MiniLM-L6-v2` on CPU (windowed mean pooling for 800-token chunks), PyMuPDF |
 | Frontend | Next.js 14 (App Router), React 18, TypeScript, Tailwind CSS, dark mode |
 | Export | Markdown and PDF (ReportLab) |
 | Ops | Docker, docker-compose; Vercel (frontend) + Railway/Render (backend) |
-| Quality | 315 backend tests (pytest), 30 frontend tests (Vitest), ESLint, strict TypeScript |
+| Quality | 338 backend tests (pytest), 30 frontend tests (Vitest), ESLint, strict TypeScript |
 
 ## Project structure
 
@@ -104,7 +104,8 @@ researchpilot/
 
 ## Quick start
 
-You need an **Anthropic API key** (<https://console.anthropic.com>). A free **Semantic Scholar API key** is
+You need **one** language-model key: a **free Google Gemini key** (<https://aistudio.google.com/apikey>,
+Google account, no card) or a paid Anthropic key (<https://console.anthropic.com>). A free **Semantic Scholar API key** is
 strongly recommended (<https://www.semanticscholar.org/product/api#api-key-form>).
 
 ### Option A – Docker (one command)
@@ -114,7 +115,7 @@ Requires Docker Desktop.
 ```powershell
 cd researchpilot
 Copy-Item .env.example .env        # macOS/Linux: cp .env.example .env
-# edit .env: set ANTHROPIC_API_KEY and JWT_SECRET_KEY
+# edit .env: set GEMINI_API_KEY (free) or ANTHROPIC_API_KEY, and JWT_SECRET_KEY
 docker compose up --build
 ```
 
@@ -130,7 +131,7 @@ Requires Python 3.11 and Node.js 18.18+ (tested with Node 22).
 cd researchpilot
 Copy-Item .env.example .env
 python -c "import secrets; print(secrets.token_urlsafe(48))"   # paste as JWT_SECRET_KEY in .env
-# also set ANTHROPIC_API_KEY in .env
+# also set GEMINI_API_KEY (free, default model) or ANTHROPIC_API_KEY in .env
 
 # 2. Backend (terminal 1)
 cd backend
@@ -155,8 +156,9 @@ All settings live in `.env` (see [.env.example](.env.example) for every option w
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | – | Required for research, chat and evaluation. |
-| `LLM_MODEL` | `claude-opus-5` | Model used by every agent. `claude-sonnet-5` costs about 40% as much. |
+| `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` | – | Key for the provider of `LLM_MODEL`; required for research, chat and evaluation. |
+| `LLM_MODEL` | `gemini-3.8-flash` (in `.env.example`) | Model used by every agent. `gemini-*` uses Google's free tier; `claude-*` uses paid Anthropic models (e.g. `claude-opus-5`, or `claude-sonnet-5` at ~40% of its price). |
+| `LLM_REQUESTS_PER_MINUTE` | `8` (in `.env.example`) | Spaces out model calls to stay under free-tier per-minute limits (`0` = unlimited). |
 | `LLM_EFFORT` | `high` | Reasoning effort (`low` … `max`); simple extraction calls automatically use at most `medium`. |
 | `JWT_SECRET_KEY` | random per process | Set it, or logins reset on every restart. Required in production. |
 | `SEMANTIC_SCHOLAR_API_KEY` | – | Without it Semantic Scholar is often rate-limited, and searches fall back to arXiv only. |
@@ -210,7 +212,7 @@ costs one full pipeline run plus judging, so start with `--limit 2` and check th
 ## Testing
 
 ```powershell
-cd backend;  pytest                                              # 315 offline tests
+cd backend;  pytest                                              # 338 offline tests
 cd backend;  $env:RP_RUN_INTEGRATION="1"; pytest -m integration  # live arXiv / Semantic Scholar / PDF / model tests
 cd frontend; npm test; npm run lint; npm run typecheck; npm run build
 ```
@@ -232,7 +234,8 @@ and the API streaming it all.
 | Problem | Fix |
 |---|---|
 | `Activate.ps1 cannot be loaded` | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, then try again. |
-| 503 "Claude is not configured" | Put `ANTHROPIC_API_KEY` in `.env` (project root) and restart the backend. |
+| 503 "The language model is not configured" | Put `GEMINI_API_KEY` (or `ANTHROPIC_API_KEY` for Claude models) in `.env` (project root) and restart the backend. |
+| "Gemini free-tier rate limit reached" | The free quota (per minute or per day) is used up. Wait, lower `LLM_REQUESTS_PER_MINUTE`, or switch to `gemini-3.5-flash-lite` (larger daily quota). The evaluation can continue later with `--resume`. |
 | Semantic Scholar warnings (HTTP 429) | Its shared public quota is exhausted; add `SEMANTIC_SCHOLAR_API_KEY`. arXiv results are still used. |
 | Frontend says "Cannot reach the ResearchPilot server" | Start the backend, and check `NEXT_PUBLIC_API_URL` in `frontend/.env.local`. |
 | Slow or odd file errors inside the project folder | The folder is inside OneDrive. Pause OneDrive syncing while developing, or move the project out of OneDrive. |

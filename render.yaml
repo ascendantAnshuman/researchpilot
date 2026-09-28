@@ -23,7 +23,11 @@ services:
       - key: JWT_SECRET_KEY
         generateValue: true
       - key: LLM_MODEL
-        value: claude-sonnet-5
+        value: gemini-3.8-flash
+      - key: LLM_REQUESTS_PER_MINUTE
+        value: "8"
+      - key: GEMINI_API_KEY
+        sync: false
       - key: MAX_CONCURRENT_RUNS
         value: "1"
       - key: ANTHROPIC_API_KEY

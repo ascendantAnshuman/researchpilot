@@ -46,8 +46,9 @@ git push -u origin main
    |---|---|
    | `ENVIRONMENT` | `production` |
    | `JWT_SECRET_KEY` | a long random string: `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
-   | `ANTHROPIC_API_KEY` | your key |
-   | `LLM_MODEL` | e.g. `claude-sonnet-5` (cheaper) or `claude-opus-5` |
+   | `GEMINI_API_KEY` | your free Gemini key (or `ANTHROPIC_API_KEY` if you use a Claude model) |
+   | `LLM_MODEL` | `gemini-3.8-flash` (free) or a Claude model such as `claude-sonnet-5` |
+   | `LLM_REQUESTS_PER_MINUTE` | `8` on the Gemini free tier |
    | `SEMANTIC_SCHOLAR_API_KEY` | your key (optional but recommended) |
    | `DATA_DIR` | `/data` |
    | `CORS_ORIGINS` | your Vercel URL from Step 3, e.g. `https://researchpilot.vercel.app` (fill in after Step 3) |
@@ -94,7 +95,7 @@ Railway sets the `PORT` variable itself; the container listens on it automatical
 ## Running everything with Docker on your own machine
 
 ```powershell
-Copy-Item .env.example .env      # then fill in ANTHROPIC_API_KEY and JWT_SECRET_KEY
+Copy-Item .env.example .env      # then fill in GEMINI_API_KEY (or ANTHROPIC_API_KEY) and JWT_SECRET_KEY
 docker compose up --build
 ```
 
@@ -115,6 +116,6 @@ Open <http://localhost:3000>. Data is kept in the Docker volume `researchpilot-d
 | Backend restarts during a run / "out of memory" | The instance has too little RAM. Use at least 1–2 GB. |
 | Accounts and reports disappear after a redeploy | No persistent volume is mounted at `/data`. |
 | Live progress never appears but the report finishes | Something between the browser and the backend buffers responses. Check for extra proxies or CDNs in front of the backend. |
-| "Claude is not configured on the server" (503) | `ANTHROPIC_API_KEY` is not set on the backend. |
+| "The language model is not configured on the server" (503) | The key for `LLM_MODEL`'s provider (`GEMINI_API_KEY` or `ANTHROPIC_API_KEY`) is not set on the backend. |
 | Runs fail with "temporarily unavailable" | Anthropic rate limit or outage. New API accounts have low limits; set `MAX_CONCURRENT_RUNS=1` and `LLM_MAX_CONCURRENCY=1`. |
 | Few papers, no citation counts | Semantic Scholar's shared public quota is exhausted (HTTP 429). Add `SEMANTIC_SCHOLAR_API_KEY`. |

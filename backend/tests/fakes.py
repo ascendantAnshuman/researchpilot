@@ -231,6 +231,49 @@ class _FakeMessages:
         return _FakeStream(self._owner.outcomes.pop(0))
 
 
+def fake_gemini_response(
+    text: str = "",
+    *,
+    finish: str = "STOP",
+    prompt_tokens: int = 1000,
+    output_tokens: int = 200,
+    thoughts: int = 50,
+    cached: int = 0,
+    block_reason: str | None = None,
+) -> SimpleNamespace:
+    """An object shaped like google-genai's ``GenerateContentResponse``."""
+    from google.genai import types
+
+    return SimpleNamespace(
+        text=text,
+        candidates=[SimpleNamespace(finish_reason=types.FinishReason(finish))],
+        usage_metadata=SimpleNamespace(
+            prompt_token_count=prompt_tokens,
+            candidates_token_count=output_tokens,
+            thoughts_token_count=thoughts,
+            cached_content_token_count=cached,
+        ),
+        prompt_feedback=SimpleNamespace(block_reason=block_reason) if block_reason else None,
+    )
+
+
+class FakeGemini:
+    """Mimics ``genai.Client``: records generate_content() calls and replays queued outcomes."""
+
+    def __init__(self, *outcomes: Any) -> None:
+        """Queue responses (or exceptions) to return from successive calls."""
+        self.outcomes = list(outcomes)
+        self.requests: list[dict[str, Any]] = []
+        self.aio = SimpleNamespace(models=SimpleNamespace(generate_content=self._generate))
+
+    async def _generate(self, *, model: str, contents: Any, config: Any) -> Any:
+        self.requests.append({"model": model, "contents": contents, "config": config})
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
 class FakeAnthropic:
     """Mimics ``AsyncAnthropic``: records stream() kwargs and replays queued outcomes."""
 

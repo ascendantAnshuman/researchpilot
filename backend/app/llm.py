@@ -1,18 +1,22 @@
-"""The single gateway to Claude. Every agent calls the LLM through this module.
+"""The single gateway to the language model. Every agent calls the LLM through this module.
 
-What it adds on top of the official ``anthropic`` SDK:
+Two providers sit behind one interface, chosen by ``LLM_MODEL``:
 
-* **Model swapping** - the model comes from ``LLM_MODEL``; features a model does
-  not support (e.g. the ``effort`` setting on Haiku 4.5) are left out automatically.
-* **Structured output** - ``structured()`` returns a validated Pydantic object
-  (the API constrains Claude's output to the model's JSON schema).
-* **Streaming** - every request is streamed, so long answers never hit HTTP timeouts.
-* **Resilience** - the SDK retries 429/5xx/network errors with exponential backoff
-  (``LLM_MAX_RETRIES``); a semaphore caps concurrent requests (``LLM_MAX_CONCURRENCY``);
-  on Claude Opus 5 / Fable 5.1 a declined request is re-run server-side on
-  Anthropic's recommended fallback model (``LLM_REFUSAL_FALLBACK``).
-* **Metering** - token usage, latency and USD cost are recorded per pipeline
-  stage in a :class:`UsageTracker`, which the evaluation reports.
+* **Anthropic Claude** (``claude-*``) through the official ``anthropic`` SDK:
+  streamed requests, ``effort`` where the model supports it, and server-side
+  refusal fallback on Claude Opus 5 / Fable 5.1.
+* **Google Gemini** (``gemini-*``) through the official ``google-genai`` SDK:
+  JSON-schema output, thinking level mapped from ``LLM_EFFORT``, and automatic
+  retries on the free tier's HTTP 429 responses. Free-tier usage costs $0.
+
+What every call gets, whichever provider serves it:
+
+* **Structured output** - ``structured()`` returns a validated Pydantic object.
+* **Resilience** - SDK retries for 429/5xx/network errors (``LLM_MAX_RETRIES``),
+  a cap on parallel requests (``LLM_MAX_CONCURRENCY``) and an optional
+  requests-per-minute limit (``LLM_REQUESTS_PER_MINUTE``, useful on free tiers).
+* **Metering** - tokens, latency and USD cost per pipeline stage in a
+  :class:`UsageTracker`, which the evaluation reports.
 """
 
 from __future__ import annotations
@@ -22,13 +26,15 @@ import logging
 import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
-from typing import Any, Protocol, TypeVar
+from typing import Any, Literal, Protocol, TypeVar
 
 import anthropic
+import httpx
 import pydantic
 from pydantic import BaseModel
 
 from app.config import Effort, Settings, get_settings
+from app.services.http_utils import RateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -48,11 +54,12 @@ MODEL_PRICES: dict[str, tuple[float, float]] = {
     "claude-sonnet-4-6": (3.0, 15.0),
     "claude-haiku-4-5": (1.0, 5.0),
 }
+FREE_TIER_PRICES: tuple[float, float] = (0.0, 0.0)
 CACHE_WRITE_MULTIPLIER = 1.25
 CACHE_READ_MULTIPLIER = 0.1
 
 EFFORT_ORDER: tuple[Effort, ...] = ("low", "medium", "high", "xhigh", "max")
-# Models accepting every effort level, including xhigh and max.
+# Claude models accepting every effort level, including xhigh and max.
 _FULL_EFFORT_MODELS = (
     "claude-fable",
     "claude-mythos",
@@ -61,13 +68,16 @@ _FULL_EFFORT_MODELS = (
     "claude-opus-4-8",
     "claude-opus-4-7",
 )
-# Models accepting low/medium/high/max but not xhigh.
+# Claude models accepting low/medium/high/max but not xhigh.
 _NO_XHIGH_MODELS = ("claude-opus-4-6", "claude-sonnet-4-6")
-# Models accepting only low/medium/high.
+# Claude models accepting only low/medium/high.
 _BASIC_EFFORT_MODELS = ("claude-opus-4-5",)
 
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 FALLBACK_MODELS: frozenset[str] = frozenset({"claude-opus-5", "claude-fable-5-1"})
+
+GEMINI_RETRY_STATUS_CODES = [408, 429, 500, 502, 503, 504]
+GEMINI_REFUSAL_REASONS = frozenset({"SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "RECITATION"})
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +98,7 @@ class LLMUnavailableError(LLMError):
 
 
 class LLMRefusalError(LLMError):
-    """Claude (and any fallback model) declined the request."""
+    """The model (and any fallback model) declined the request."""
 
 
 class LLMOutputError(LLMError):
@@ -106,7 +116,7 @@ def _matches(model: str, families: Sequence[str]) -> bool:
 
 
 def resolve_effort(model: str, requested: Effort) -> Effort | None:
-    """The effort level to send for ``model``, or None if the model has no effort setting."""
+    """The Claude effort level to send for ``model``, or None if the model has no effort setting."""
     if _matches(model, _FULL_EFFORT_MODELS):
         return requested
     if _matches(model, _NO_XHIGH_MODELS):
@@ -116,15 +126,24 @@ def resolve_effort(model: str, requested: Effort) -> Effort | None:
     return None
 
 
+def gemini_thinking_level(model: str, effort: Effort) -> str | None:
+    """Gemini 3.x thinking level for an effort setting (older Gemini models use their default)."""
+    if not model.startswith("gemini-3"):
+        return None
+    return {"low": "LOW", "medium": "MEDIUM"}.get(effort, "HIGH")
+
+
 def lighter_effort(effort: Effort, cap: Effort = "medium") -> Effort:
     """The lower of ``effort`` and ``cap`` - used for simple extraction-style calls."""
     return EFFORT_ORDER[min(EFFORT_ORDER.index(effort), EFFORT_ORDER.index(cap))]
 
 
 def model_prices(model: str, settings: Settings) -> tuple[float, float] | None:
-    """USD per million (input, output) tokens: ``.env`` overrides first, then the built-in table."""
+    """USD per million (input, output) tokens: ``.env`` overrides, else free for Gemini, else the Claude table."""
     if settings.llm_input_cost_per_mtok is not None and settings.llm_output_cost_per_mtok is not None:
         return settings.llm_input_cost_per_mtok, settings.llm_output_cost_per_mtok
+    if model.startswith("gemini"):
+        return FREE_TIER_PRICES
     for family in sorted(MODEL_PRICES, key=len, reverse=True):
         if model == family or model.startswith(f"{family}-"):
             return MODEL_PRICES[family]
@@ -212,6 +231,277 @@ class UsageTracker:
 
 
 # ---------------------------------------------------------------------------
+# Provider back-ends
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Completion:
+    """A provider-neutral model response."""
+
+    text: str
+    parsed: BaseModel | None
+    input_tokens: int
+    output_tokens: int
+    cache_write_tokens: int = 0
+    cache_read_tokens: int = 0
+    stop: Literal["end", "max_tokens", "refusal"] = "end"
+    refusal_detail: str | None = None
+
+
+class _Backend(Protocol):
+    """One provider's way of executing a request."""
+
+    client: Any
+
+    async def complete(
+        self,
+        *,
+        stage: str,
+        system: str,
+        messages: list[Message],
+        effort: Effort,
+        max_tokens: int,
+        output_model: type[BaseModel] | None,
+    ) -> Completion:
+        """Run one request and return a :class:`Completion` (or raise an ``LLMError``)."""
+        ...
+
+
+class _AnthropicBackend:
+    """Claude via the ``anthropic`` SDK (streamed, with refusal fallback where available)."""
+
+    def __init__(self, settings: Settings, client: Any | None) -> None:
+        self.settings = settings
+        self.model = settings.llm_model
+        if client is not None:
+            self.client = client
+            return
+        key = settings.anthropic_api_key
+        try:
+            self.client = anthropic.AsyncAnthropic(
+                api_key=key.get_secret_value() if key else None,
+                timeout=settings.llm_timeout_seconds,
+                max_retries=settings.llm_max_retries,
+            )
+        except anthropic.AnthropicError as exc:
+            raise LLMConfigurationError("No Anthropic credentials found. Set ANTHROPIC_API_KEY in the .env file.") from exc
+
+    @property
+    def uses_refusal_fallback(self) -> bool:
+        return self.settings.llm_refusal_fallback and self.model in FALLBACK_MODELS
+
+    def request_kwargs(
+        self,
+        system: str,
+        messages: list[Message],
+        effort: Effort,
+        max_tokens: int,
+        output_model: type[BaseModel] | None,
+    ) -> dict[str, Any]:
+        """SDK arguments, leaving out features the model does not support."""
+        kwargs: dict[str, Any] = {"model": self.model, "max_tokens": max_tokens, "system": system, "messages": messages}
+        resolved_effort = resolve_effort(self.model, effort)
+        if resolved_effort is not None:
+            kwargs["output_config"] = {"effort": resolved_effort}
+        if output_model is not None:
+            kwargs["output_format"] = output_model
+        return kwargs
+
+    async def complete(
+        self,
+        *,
+        stage: str,
+        system: str,
+        messages: list[Message],
+        effort: Effort,
+        max_tokens: int,
+        output_model: type[BaseModel] | None,
+    ) -> Completion:
+        kwargs = self.request_kwargs(system, messages, effort, max_tokens, output_model)
+        try:
+            if self.uses_refusal_fallback:
+                manager = self.client.beta.messages.stream(**kwargs, betas=[FALLBACK_BETA], fallbacks="default")
+            else:
+                manager = self.client.messages.stream(**kwargs)
+            async with manager as stream:
+                message = await stream.get_final_message()
+        except anthropic.AuthenticationError as exc:
+            raise LLMConfigurationError("ANTHROPIC_API_KEY was rejected - check the key in .env") from exc
+        except anthropic.PermissionDeniedError as exc:
+            raise LLMConfigurationError(f"The API key cannot use model {self.model!r}") from exc
+        except anthropic.NotFoundError as exc:
+            raise LLMConfigurationError(f"Model {self.model!r} was not found - check LLM_MODEL") from exc
+        except anthropic.BadRequestError as exc:
+            raise LLMError(f"{stage}: request rejected by the API: {exc.message}") from exc
+        except (anthropic.RateLimitError, anthropic.InternalServerError, anthropic.APIConnectionError) as exc:
+            raise LLMUnavailableError(f"{stage}: Claude is unavailable after retries ({exc})") from exc
+        except anthropic.APIStatusError as exc:
+            raise LLMError(f"{stage}: API error {exc.status_code}: {exc.message}") from exc
+        except pydantic.ValidationError as exc:
+            raise LLMOutputError(f"{stage}: the model's JSON did not match the expected schema: {exc}") from exc
+
+        usage = message.usage
+        stop: Literal["end", "max_tokens", "refusal"] = "end"
+        detail = None
+        if message.stop_reason == "refusal":
+            stop = "refusal"
+            details = getattr(message, "stop_details", None)
+            detail = getattr(details, "category", None) if details is not None else None
+        elif message.stop_reason == "max_tokens":
+            stop = "max_tokens"
+        return Completion(
+            text="".join(block.text for block in message.content if getattr(block, "type", None) == "text").strip(),
+            parsed=getattr(message, "parsed_output", None),
+            input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
+            output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
+            cache_write_tokens=int(getattr(usage, "cache_creation_input_tokens", 0) or 0),
+            cache_read_tokens=int(getattr(usage, "cache_read_input_tokens", 0) or 0),
+            stop=stop,
+            refusal_detail=detail,
+        )
+
+
+def _gemini_contents(messages: list[Message]) -> list[Any]:
+    """Convert Anthropic-style messages into Gemini ``Content`` objects (roles user/model)."""
+    from google.genai import types
+
+    contents = []
+    for message in messages:
+        content = message["content"]
+        texts = [content] if isinstance(content, str) else [
+            block["text"] for block in content if isinstance(block, dict) and block.get("type") == "text"
+        ]
+        role = "model" if message["role"] == "assistant" else "user"
+        contents.append(types.Content(role=role, parts=[types.Part(text=text) for text in texts if text]))
+    return contents
+
+
+class _GeminiBackend:
+    """Gemini via the ``google-genai`` SDK (JSON-schema output, retries on 429/5xx)."""
+
+    def __init__(self, settings: Settings, client: Any | None) -> None:
+        self.settings = settings
+        self.model = settings.llm_model
+        if client is not None:
+            self.client = client
+            return
+        from google import genai
+        from google.genai import types
+
+        key = settings.gemini_api_key
+        if key is None or not key.get_secret_value().strip():
+            raise LLMConfigurationError("No Gemini API key found. Set GEMINI_API_KEY in the .env file.")
+        self.client = genai.Client(
+            api_key=key.get_secret_value(),
+            http_options=types.HttpOptions(
+                timeout=int(settings.llm_timeout_seconds * 1000),
+                retry_options=types.HttpRetryOptions(
+                    attempts=settings.llm_max_retries + 1,
+                    initial_delay=2.0,
+                    max_delay=60.0,
+                    exp_base=2.0,
+                    jitter=1.0,
+                    http_status_codes=GEMINI_RETRY_STATUS_CODES,
+                ),
+            ),
+        )
+
+    def request_config(
+        self, system: str, effort: Effort, max_tokens: int, output_model: type[BaseModel] | None
+    ) -> Any:
+        """The ``GenerateContentConfig`` for a request."""
+        from google.genai import types
+
+        config: dict[str, Any] = {"system_instruction": system, "max_output_tokens": max_tokens}
+        level = gemini_thinking_level(self.model, effort)
+        if level is not None:
+            config["thinking_config"] = types.ThinkingConfig(thinking_level=level)
+        if output_model is not None:
+            config["response_mime_type"] = "application/json"
+            config["response_schema"] = output_model
+        return types.GenerateContentConfig(**config)
+
+    async def complete(
+        self,
+        *,
+        stage: str,
+        system: str,
+        messages: list[Message],
+        effort: Effort,
+        max_tokens: int,
+        output_model: type[BaseModel] | None,
+    ) -> Completion:
+        from google.genai import errors
+
+        try:
+            response = await self.client.aio.models.generate_content(
+                model=self.model,
+                contents=_gemini_contents(messages),
+                config=self.request_config(system, effort, max_tokens, output_model),
+            )
+        except errors.ClientError as exc:
+            code = getattr(exc, "code", None)
+            text = str(exc)
+            if code == 429:
+                raise LLMUnavailableError(
+                    f"{stage}: Gemini free-tier rate limit reached (per minute or per day). Wait and retry, lower "
+                    "LLM_REQUESTS_PER_MINUTE, or switch LLM_MODEL to a Flash-Lite model."
+                ) from exc
+            if code in (401, 403) or "API_KEY_INVALID" in text or "API key not valid" in text:
+                raise LLMConfigurationError("GEMINI_API_KEY was rejected - check the key in .env") from exc
+            if code == 404:
+                raise LLMConfigurationError(f"Gemini model {self.model!r} was not found - check LLM_MODEL") from exc
+            raise LLMError(f"{stage}: request rejected by Gemini: {text}") from exc
+        except errors.ServerError as exc:
+            raise LLMUnavailableError(f"{stage}: Gemini is unavailable after retries ({exc})") from exc
+        except errors.APIError as exc:
+            raise LLMError(f"{stage}: Gemini API error: {exc}") from exc
+        except (httpx.TransportError, OSError) as exc:  # network failures after the SDK's own retries
+            raise LLMUnavailableError(f"{stage}: cannot reach Gemini ({exc})") from exc
+
+        usage = response.usage_metadata
+        input_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
+        output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0) + int(
+            getattr(usage, "thoughts_token_count", 0) or 0
+        )
+        cache_read = int(getattr(usage, "cached_content_token_count", 0) or 0)
+
+        feedback = getattr(response, "prompt_feedback", None)
+        block_reason = getattr(feedback, "block_reason", None) if feedback is not None else None
+        candidates = getattr(response, "candidates", None) or []
+        finish = getattr(candidates[0], "finish_reason", None) if candidates else None
+        finish_name = str(getattr(finish, "value", finish) or "")
+        stop: Literal["end", "max_tokens", "refusal"] = "end"
+        if block_reason is not None or finish_name in GEMINI_REFUSAL_REASONS:
+            stop = "refusal"
+        elif finish_name == "MAX_TOKENS":
+            stop = "max_tokens"
+
+        text = ""
+        if stop != "refusal":
+            try:
+                text = (response.text or "").strip()
+            except (ValueError, AttributeError):
+                text = ""
+        parsed: BaseModel | None = None
+        if output_model is not None and stop == "end" and text:
+            try:
+                parsed = output_model.model_validate_json(text)
+            except pydantic.ValidationError as exc:
+                raise LLMOutputError(f"{stage}: Gemini's JSON did not match the expected schema: {exc}") from exc
+        return Completion(
+            text=text,
+            parsed=parsed,
+            input_tokens=max(0, input_tokens - cache_read),
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read,
+            stop=stop,
+            refusal_detail=str(getattr(block_reason, "value", block_reason) or finish_name or "") or None,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
 
@@ -232,7 +522,7 @@ class LLM(Protocol):
         effort: Effort | None = None,
         max_tokens: int | None = None,
     ) -> T:
-        """Return Claude's answer parsed into ``output_model``."""
+        """Return the model's answer parsed into ``output_model``."""
         ...
 
     async def text(
@@ -244,12 +534,12 @@ class LLM(Protocol):
         effort: Effort | None = None,
         max_tokens: int | None = None,
     ) -> str:
-        """Return Claude's plain-text answer."""
+        """Return the model's plain-text answer."""
         ...
 
 
 class LLMClient:
-    """Claude client used by all agents (see the module docstring for what it adds)."""
+    """The client used by all agents (see the module docstring for what it adds)."""
 
     def __init__(
         self,
@@ -261,38 +551,30 @@ class LLMClient:
 
         Args:
             settings: Configuration (defaults to the global settings).
-            client: A pre-built ``anthropic.AsyncAnthropic`` (tests pass a fake).
+            client: A pre-built provider SDK client (tests pass a fake).
             tracker: Usage tracker to record into (a new one by default).
 
         Raises:
-            LLMConfigurationError: If no Anthropic credentials can be found.
+            LLMConfigurationError: If no credentials for the provider can be found.
         """
         self.settings = settings or get_settings()
         self.model = self.settings.llm_model
+        self.provider = self.settings.llm_provider
         self.tracker = tracker or UsageTracker()
         self._prices = model_prices(self.model, self.settings)
         if self._prices is None:
             logger.warning("No price known for model %s: cost will be reported as $0", self.model)
+        self._backend: _Backend = (
+            _GeminiBackend(self.settings, client) if self.provider == "gemini" else _AnthropicBackend(self.settings, client)
+        )
+        rpm = self.settings.llm_requests_per_minute
+        self._rate_limiter = RateLimiter(60.0 / rpm) if rpm > 0 else None
         self._semaphore: asyncio.Semaphore | None = None
-        if client is not None:
-            self._client = client
-            return
-        key = self.settings.anthropic_api_key
-        try:
-            self._client = anthropic.AsyncAnthropic(
-                api_key=key.get_secret_value() if key else None,
-                timeout=self.settings.llm_timeout_seconds,
-                max_retries=self.settings.llm_max_retries,
-            )
-        except anthropic.AnthropicError as exc:
-            raise LLMConfigurationError(
-                "No Anthropic credentials found. Set ANTHROPIC_API_KEY in the .env file."
-            ) from exc
 
     @property
     def uses_refusal_fallback(self) -> bool:
-        """Whether requests opt into server-side refusal fallbacks."""
-        return self.settings.llm_refusal_fallback and self.model in FALLBACK_MODELS
+        """Whether requests opt into Claude's server-side refusal fallbacks."""
+        return isinstance(self._backend, _AnthropicBackend) and self._backend.uses_refusal_fallback
 
     async def structured(
         self,
@@ -304,24 +586,18 @@ class LLMClient:
         effort: Effort | None = None,
         max_tokens: int | None = None,
     ) -> T:
-        """Ask Claude for JSON matching ``output_model`` and return the validated object.
+        """Ask for JSON matching ``output_model`` and return the validated object.
 
         Raises:
             LLMOutputError: If the answer was cut off or could not be parsed.
             LLMRefusalError, LLMUnavailableError, LLMConfigurationError: See :meth:`_call`.
         """
-        message = await self._call(
-            stage=stage,
-            system=system,
-            messages=messages,
-            effort=effort,
-            max_tokens=max_tokens,
-            output_model=output_model,
+        completion = await self._call(
+            stage=stage, system=system, messages=messages, effort=effort, max_tokens=max_tokens, output_model=output_model
         )
-        parsed = getattr(message, "parsed_output", None)
-        if not isinstance(parsed, output_model):
-            raise LLMOutputError(f"{stage}: Claude's answer could not be parsed as {output_model.__name__}")
-        return parsed
+        if not isinstance(completion.parsed, output_model):
+            raise LLMOutputError(f"{stage}: the model's answer could not be parsed as {output_model.__name__}")
+        return completion.parsed
 
     async def text(
         self,
@@ -332,31 +608,9 @@ class LLMClient:
         effort: Effort | None = None,
         max_tokens: int | None = None,
     ) -> str:
-        """Ask Claude for a plain-text answer (thinking blocks are ignored)."""
-        message = await self._call(stage=stage, system=system, messages=messages, effort=effort, max_tokens=max_tokens)
-        return "".join(block.text for block in message.content if getattr(block, "type", None) == "text").strip()
-
-    def _request_kwargs(
-        self,
-        system: str,
-        messages: list[Message],
-        effort: Effort | None,
-        max_tokens: int | None,
-        output_model: type[BaseModel] | None,
-    ) -> dict[str, Any]:
-        """Build SDK arguments, leaving out features the model does not support."""
-        kwargs: dict[str, Any] = {
-            "model": self.model,
-            "max_tokens": max_tokens or self.settings.llm_max_tokens,
-            "system": system,
-            "messages": messages,
-        }
-        resolved_effort = resolve_effort(self.model, effort or self.settings.llm_effort)
-        if resolved_effort is not None:
-            kwargs["output_config"] = {"effort": resolved_effort}
-        if output_model is not None:
-            kwargs["output_format"] = output_model
-        return kwargs
+        """Ask for a plain-text answer (thinking is not included)."""
+        completion = await self._call(stage=stage, system=system, messages=messages, effort=effort, max_tokens=max_tokens)
+        return completion.text
 
     async def _call(
         self,
@@ -367,83 +621,64 @@ class LLMClient:
         effort: Effort | None,
         max_tokens: int | None,
         output_model: type[BaseModel] | None = None,
-    ) -> Any:
-        """Stream one request, record usage, and translate SDK errors.
+    ) -> Completion:
+        """Run one request with concurrency/rate limits, record usage, and check how it ended.
 
         Raises:
             LLMConfigurationError: Bad key, missing permission or unknown model.
             LLMUnavailableError: Rate limit, overload or network failure after retries.
-            LLMRefusalError: Claude declined (``stop_reason == "refusal"``).
+            LLMRefusalError: The model declined.
             LLMOutputError: Output truncated at ``max_tokens`` or failed validation.
             LLMError: Any other rejected request.
         """
-        kwargs = self._request_kwargs(system, messages, effort, max_tokens, output_model)
         if self._semaphore is None:
             self._semaphore = asyncio.Semaphore(self.settings.llm_max_concurrency)
-
+        limit = max_tokens or self.settings.llm_max_tokens
         async with self._semaphore:
+            if self._rate_limiter is not None:
+                await self._rate_limiter.wait()
             started = time.perf_counter()
-            try:
-                if self.uses_refusal_fallback:
-                    stream_manager = self._client.beta.messages.stream(
-                        **kwargs, betas=[FALLBACK_BETA], fallbacks="default"
-                    )
-                else:
-                    stream_manager = self._client.messages.stream(**kwargs)
-                async with stream_manager as stream:
-                    message = await stream.get_final_message()
-            except anthropic.AuthenticationError as exc:
-                raise LLMConfigurationError("ANTHROPIC_API_KEY was rejected - check the key in .env") from exc
-            except anthropic.PermissionDeniedError as exc:
-                raise LLMConfigurationError(f"The API key cannot use model {self.model!r}") from exc
-            except anthropic.NotFoundError as exc:
-                raise LLMConfigurationError(f"Model {self.model!r} was not found - check LLM_MODEL") from exc
-            except anthropic.BadRequestError as exc:
-                raise LLMError(f"{stage}: request rejected by the API: {exc.message}") from exc
-            except (anthropic.RateLimitError, anthropic.InternalServerError, anthropic.APIConnectionError) as exc:
-                raise LLMUnavailableError(f"{stage}: Claude is unavailable after retries ({exc})") from exc
-            except anthropic.APIStatusError as exc:
-                raise LLMError(f"{stage}: API error {exc.status_code}: {exc.message}") from exc
-            except pydantic.ValidationError as exc:
-                raise LLMOutputError(f"{stage}: Claude's JSON did not match the expected schema: {exc}") from exc
+            completion = await self._backend.complete(
+                stage=stage,
+                system=system,
+                messages=messages,
+                effort=effort or self.settings.llm_effort,
+                max_tokens=limit,
+                output_model=output_model,
+            )
             elapsed = time.perf_counter() - started
 
-        self._record_usage(stage, message, elapsed)
-
-        if message.stop_reason == "refusal":
-            details = getattr(message, "stop_details", None)
-            category = getattr(details, "category", None) if details is not None else None
-            raise LLMRefusalError(f"{stage}: Claude declined the request (category: {category or 'unspecified'})")
-        if message.stop_reason == "max_tokens":
-            raise LLMOutputError(
-                f"{stage}: the answer was cut off at LLM_MAX_TOKENS={kwargs['max_tokens']}; raise it in .env"
-            )
-        return message
-
-    def _record_usage(self, stage: str, message: Any, seconds: float) -> None:
-        """Record tokens and cost of one response."""
-        usage = message.usage
-        input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
-        output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
-        cache_write = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
-        cache_read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
-        cost = compute_cost(self._prices, input_tokens, output_tokens, cache_write, cache_read)
+        cost = compute_cost(
+            self._prices,
+            completion.input_tokens,
+            completion.output_tokens,
+            completion.cache_write_tokens,
+            completion.cache_read_tokens,
+        )
         self.tracker.record(
             stage,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_write_tokens=cache_write,
-            cache_read_tokens=cache_read,
+            input_tokens=completion.input_tokens,
+            output_tokens=completion.output_tokens,
+            cache_write_tokens=completion.cache_write_tokens,
+            cache_read_tokens=completion.cache_read_tokens,
             cost_usd=cost,
-            seconds=seconds,
+            seconds=elapsed,
         )
         logger.debug(
             "%s: %d in / %d out tokens (cache r/w %d/%d), $%.4f, %.1fs",
             stage,
-            input_tokens,
-            output_tokens,
-            cache_read,
-            cache_write,
+            completion.input_tokens,
+            completion.output_tokens,
+            completion.cache_read_tokens,
+            completion.cache_write_tokens,
             cost,
-            seconds,
+            elapsed,
         )
+
+        if completion.stop == "refusal":
+            raise LLMRefusalError(
+                f"{stage}: the model declined the request (reason: {completion.refusal_detail or 'unspecified'})"
+            )
+        if completion.stop == "max_tokens":
+            raise LLMOutputError(f"{stage}: the answer was cut off at LLM_MAX_TOKENS={limit}; raise it in .env")
+        return completion

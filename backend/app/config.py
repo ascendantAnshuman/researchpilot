@@ -36,6 +36,7 @@ MIN_PRODUCTION_SECRET_LENGTH = 32
 
 _OPTIONAL_FIELDS: tuple[str, ...] = (
     "anthropic_api_key",
+    "gemini_api_key",
     "semantic_scholar_api_key",
     "jwt_secret_key",
     "database_url",
@@ -73,9 +74,11 @@ class Settings(BaseSettings):
     bcrypt_rounds: int = Field(default=12, ge=4, le=16)
     allow_registration: bool = True
 
-    # ---------- LLM (Anthropic Claude) ----------
+    # ---------- LLM (Anthropic Claude or Google Gemini, chosen by LLM_MODEL) ----------
     anthropic_api_key: SecretStr | None = None
+    gemini_api_key: SecretStr | None = None
     llm_model: str = "claude-opus-5"
+    llm_requests_per_minute: int = Field(default=0, ge=0, le=10000)
     llm_effort: Effort = "high"
     llm_max_tokens: int = Field(default=32000, ge=256, le=128000)
     llm_timeout_seconds: float = Field(default=300.0, gt=0)
@@ -190,9 +193,20 @@ class Settings(BaseSettings):
         return self.data_dir / "pdfs"
 
     @property
+    def llm_provider(self) -> Literal["anthropic", "gemini"]:
+        """Which API serves ``LLM_MODEL``: Gemini for ``gemini-*`` models, otherwise Anthropic."""
+        return "gemini" if self.llm_model.strip().lower().startswith("gemini") else "anthropic"
+
+    @property
+    def llm_key_name(self) -> str:
+        """The .env variable holding the API key for the active provider."""
+        return "GEMINI_API_KEY" if self.llm_provider == "gemini" else "ANTHROPIC_API_KEY"
+
+    @property
     def llm_configured(self) -> bool:
-        """Whether an Anthropic API key is present."""
-        return self.anthropic_api_key is not None and bool(self.anthropic_api_key.get_secret_value().strip())
+        """Whether an API key for the active provider is present."""
+        key = self.gemini_api_key if self.llm_provider == "gemini" else self.anthropic_api_key
+        return key is not None and bool(key.get_secret_value().strip())
 
     @property
     def jwt_secret_is_ephemeral(self) -> bool:

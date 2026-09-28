@@ -259,7 +259,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stdout.reconfigure(errors="replace")
 
     if not settings.llm_configured:
-        logger.error("ANTHROPIC_API_KEY is not set. Add it to the .env file in the project root (see .env.example).")
+        logger.error(
+            "%s is not set. Add it to the .env file in the project root (see .env.example).", settings.llm_key_name
+        )
         return 2
     try:
         report = asyncio.run(run_research(args.question, settings=settings))

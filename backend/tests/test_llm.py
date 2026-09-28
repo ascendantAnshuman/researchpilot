@@ -247,5 +247,6 @@ def test_real_client_is_built_from_settings(test_settings: Settings) -> None:
 
     client = LLMClient(keyed)
 
-    assert isinstance(client._client, anthropic.AsyncAnthropic)
-    assert client._client.max_retries == 4
+    assert client.provider == "anthropic"
+    assert isinstance(client._backend.client, anthropic.AsyncAnthropic)
+    assert client._backend.client.max_retries == 4

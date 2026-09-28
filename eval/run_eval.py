@@ -189,8 +189,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     judge_settings = settings.model_copy(update={"llm_model": args.judge_model or settings.llm_model})
     setup_logging(settings.log_level)
 
-    if not settings.llm_configured:
-        logger.error("ANTHROPIC_API_KEY is not set. Add it to the .env file in the project root.")
+    if not settings.llm_configured or not judge_settings.llm_configured:
+        missing = settings.llm_key_name if not settings.llm_configured else judge_settings.llm_key_name
+        logger.error("%s is not set. Add it to the .env file in the project root.", missing)
         return 2
 
     questions = load_questions(args.questions)

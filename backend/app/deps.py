@@ -9,7 +9,9 @@ from app.llm import LLM, LLMClient
 from app.services.run_manager import RunManager
 from app.services.vector_store import VectorStore, get_vector_store
 
-LLM_NOT_CONFIGURED = "Claude is not configured on the server: set ANTHROPIC_API_KEY in the .env file."
+def llm_not_configured_message(settings: Settings) -> str:
+    """Explains which key is missing for the configured model."""
+    return f"The language model is not configured on the server: set {settings.llm_key_name} in the .env file."
 
 
 def get_run_manager(request: Request) -> RunManager:
@@ -24,9 +26,9 @@ def get_store(settings: Settings = Depends(get_settings)) -> VectorStore:
 
 
 def require_llm_configured(settings: Settings = Depends(get_settings)) -> None:
-    """Reject requests that need Claude when no API key is configured (HTTP 503)."""
+    """Reject requests that need the language model when no API key is configured (HTTP 503)."""
     if not settings.llm_configured:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=LLM_NOT_CONFIGURED)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=llm_not_configured_message(settings))
 
 
 def get_chat_llm(
@@ -34,7 +36,7 @@ def get_chat_llm(
     settings: Settings = Depends(get_settings),
     _: None = Depends(require_llm_configured),
 ) -> LLM:
-    """A Claude client for chat, created once and reused across requests."""
+    """An LLM client for chat, created once and reused across requests."""
     llm: LLM | None = getattr(request.app.state, "chat_llm", None)
     if llm is None:
         llm = LLMClient(settings)

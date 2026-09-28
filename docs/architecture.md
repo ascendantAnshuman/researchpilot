@@ -126,7 +126,7 @@ sequenceDiagram
 | `main.py` | FastAPI app factory: CORS, routers, start-up checks. |
 | `config.py` | One typed `Settings` object loaded from `.env`; every setting lives here. |
 | `logging_config.py` | One-time logging set-up (format, level, quiet third-party loggers). |
-| `llm.py` | The only module that calls Claude: retries, structured JSON output, token and cost tracking. |
+| `llm.py` | The only module that calls the language model (Google Gemini free tier or Anthropic Claude, chosen by `LLM_MODEL`): retries, rate limiting, structured JSON output, token and cost tracking. |
 | `db.py` | SQLAlchemy engine, session factory and table creation (SQLite). |
 | `models.py` | ORM tables: users, research sessions, reports (with claim verification as JSON), session papers, chat messages. |
 | `schemas.py` | Pydantic v2 request/response and shared domain models. |
