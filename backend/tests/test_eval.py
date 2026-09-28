@@ -183,11 +183,15 @@ def test_summary_statistics() -> None:
     """Means, paired deltas, bootstrap CIs and win/loss counts are computed per metric."""
     results = [question_result(1, 0.9, 0.7), question_result(2, 0.8, 0.8), question_result(3, 0.95, 0.75)]
     results.append(QuestionResult(id="q04", topic="t", question="Broken?", error="RuntimeError: boom"))
+    # Both arms exist but a model call failed (e.g. the Critic ran out of quota): incomplete, so left out.
+    incomplete = question_result(5, 0.1, 0.9)
+    incomplete.error = "Incomplete - some model calls failed, re-run with --resume: Critic failed"
+    results.append(incomplete)
 
     summary = summarize(results)
 
     faithfulness = summary["metrics"]["faithfulness"]
-    assert summary["questions_completed"] == 3 and summary["questions_failed"] == 1
+    assert summary["questions_completed"] == 3 and summary["questions_failed"] == 2
     assert faithfulness["n"] == 3
     assert faithfulness["delta_mean"] == pytest.approx((0.2 + 0.0 + 0.2) / 3)
     low, high = faithfulness["delta_ci95"]
@@ -196,7 +200,8 @@ def test_summary_statistics() -> None:
     # Lower is better for latency: the slower Critic arm counts as "worse".
     assert summary["metrics"]["latency_seconds"]["critic_worse"] == 3
     assert summary["stage_seconds"]["with_critic"]["critic"] == 30.0
-    assert summary["total_judge_cost_usd"] == pytest.approx(0.3)
+    # Judge cost counts every question, including incomplete ones: that money was spent.
+    assert summary["total_judge_cost_usd"] == pytest.approx(0.4)
 
 
 def test_markdown_summary_contains_the_ablation_table() -> None:

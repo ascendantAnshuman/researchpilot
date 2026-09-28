@@ -1,0 +1,11 @@
+# Résumé bullets (from your evaluation results)
+
+- Built ResearchPilot, a multi-agent research copilot (LangGraph, FastAPI, Next.js, Google Gemini API) in which Planner, Search, Reader, Synthesizer and Critic agents turn a research question into a cited, fact-checked literature review from arXiv and Semantic Scholar papers, with live agent progress streamed over SSE.
+- Designed a Critic agent that verifies every atomic claim against its source passages and triggers a revision; in a paired ablation over 13 research questions it raised claim faithfulness from 73.8% to 85.0% (+11.3 pts, 95% CI +4.1 pts to +18.3 pts) and raised citation accuracy from 44.6% to 54.5% (+9.8 pts, 95% CI +3.3 pts to +16.1 pts).
+- Implemented retrieval-augmented generation over full-text PDFs (PyMuPDF, 800-token chunks, MiniLM embeddings with windowed pooling, ChromaDB) with chunk-level citations and graceful fallbacks for rate limits and unreadable PDFs, averaging 6.0 papers per question, 261 s end-to-end and $0 on the free API tier.
+- Built an automated evaluation harness with LLM-as-judge metrics for citation accuracy, faithfulness and relevance (answer relevance 5.00/5) and bootstrap confidence intervals; shipped with 380+ automated tests (pytest, Vitest), CI, Docker Compose and deployment configs for Vercel and Render/Railway.
+
+# Results paragraph for the project report
+
+We evaluated ResearchPilot on 13 research questions spanning machine learning and NLP topics, using gemini-3.5-flash-lite for the pipeline and gemini-3.5-flash-lite as the judge. For each question the pipeline ran once; the Synthesizer's first draft, finalised without verification, formed the without-Critic arm, so both arms shared the same papers and evidence. With the Critic, claim faithfulness was 85.0% versus 73.8% without it (+11.3 pts, 95% bootstrap CI +4.1 pts to +18.3 pts; better on 10, worse on 3, tied on 0 questions). With the Critic, citation accuracy was 54.5% versus 44.6% without it (+9.8 pts, 95% bootstrap CI +3.3 pts to +16.1 pts; better on 9, worse on 4, tied on 0 questions). Answer relevance was 5.00/5 with the Critic and 5.00/5 without it. The Critic added 145 s of latency and $0.000 of API cost per question on average (totals: 261 s and $0.000), triggering 0.92 revisions and removing 2.2 unsupported claims per report.
+

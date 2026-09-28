@@ -137,7 +137,9 @@ def bootstrap_ci(deltas: np.ndarray, seed: int = 7) -> tuple[float, float]:
 
 def summarize(results: list[QuestionResult]) -> dict[str, Any]:
     """Per-metric means for both arms, paired differences with 95% CIs, and win/tie/loss counts."""
-    complete = [result for result in results if result.with_critic and result.without_critic]
+    # A question marked with an error (e.g. a model call failed) has incomplete data, so it is left out even if
+    # both arms exist; --resume evaluates it again.
+    complete = [result for result in results if result.error is None and result.with_critic and result.without_critic]
     summary: dict[str, Any] = {
         "questions_total": len(results),
         "questions_completed": len(complete),
