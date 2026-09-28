@@ -272,6 +272,8 @@ and the API streaming it all.
 | 503 "The language model is not configured" | Put `GEMINI_API_KEY` (or `ANTHROPIC_API_KEY` for Claude models) in `.env` (project root) and restart the backend. |
 | "Gemini free-tier rate limit reached" | The free quota (per minute or per day) is used up. Wait, lower `LLM_REQUESTS_PER_MINUTE`, or switch to `gemini-3.5-flash-lite` (larger daily quota). The evaluation can continue later with `--resume`. |
 | Semantic Scholar warnings (HTTP 429) | Its shared public quota is exhausted; add `SEMANTIC_SCHOLAR_API_KEY`. arXiv results are still used. |
+| "Another ResearchPilot process ... is using the vector store" | ChromaDB cannot be shared by two processes, so a second backend or CLI run on the same `DATA_DIR` is refused. Stop the other one (the evaluation uses its own `data/eval` folder, so it may run alongside the app). |
+| Backend window closes/crashes at the start of every run (Windows log: `chromadb_rust_bindings.pyd`, `0xc0000005`) | The vector index is corrupted. Stop the backend, rename `backend\data\chroma` to `chroma-old`, then from `backend\` run `.\.venv\Scripts\python -m app.services.reindex` to rebuild it from your saved sessions and cached PDFs, and start again. |
 | Frontend says "Cannot reach the ResearchPilot server" | Start the backend, and check `NEXT_PUBLIC_API_URL` in `frontend/.env.local`. |
 | Slow or odd file errors inside the project folder | The folder is inside OneDrive. Pause OneDrive syncing while developing, or move the project out of OneDrive. |
 
