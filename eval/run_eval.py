@@ -193,6 +193,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Ignore LLM_FALLBACK_MODEL so every call uses exactly the chosen models (consistent measurements).",
     )
     parser.add_argument("--top-n", type=int, help="Papers per question (default: TOP_N_PAPERS).")
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        help="Folder for the evaluation's vector store and PDF cache (default: DATA_DIR/eval, separate from the "
+        "web app's, so the app can keep running during an evaluation).",
+    )
     parser.add_argument("--resume", action="store_true", help="Skip questions already completed in results.json.")
     parser.add_argument("--yes", action="store_true", help="Do not ask for confirmation before spending API credit.")
     return parser.parse_args(argv)
@@ -222,7 +228,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         overrides["top_n_papers"] = args.top_n
     if args.no_fallback:
         overrides["llm_fallback_model"] = None
-    settings = base.model_copy(update=overrides) if overrides else base
+    # Never share the web app's vector store: ChromaDB is not safe for two processes at once.
+    overrides["data_dir"] = (args.data_dir or base.data_dir / "eval").resolve()
+    settings = base.model_copy(update=overrides)
+    settings.ensure_data_dirs()
     judge_settings = settings.model_copy(update={"llm_model": args.judge_model or settings.llm_model})
     setup_logging(settings.log_level)
 

@@ -26,7 +26,7 @@ from app.config import Settings, get_settings  # noqa: E402
 from app.db import create_tables, dispose_engine, get_session_factory, init_engine  # noqa: E402
 from app.llm import reset_llm_state  # noqa: E402
 from app.main import create_app  # noqa: E402
-from app.services.vector_store import VectorStore  # noqa: E402
+from app.services.vector_store import VectorStore, release_store_directory  # noqa: E402
 from tests.api_harness import Api, build_api  # noqa: E402
 from tests.fakes import HashingEmbedder  # noqa: E402
 
@@ -145,5 +145,6 @@ def vector_store(tmp_path: Path) -> Iterator[VectorStore]:
     """A ChromaDB store in a temp folder using the offline hashing embedder."""
     store = VectorStore(tmp_path / "chroma", HashingEmbedder())
     yield store
-    # Release Chroma's cached client so Windows can delete the temp folder.
+    # Release Chroma's cached client and our process lock so Windows can delete the temp folder.
     SharedSystemClient.clear_system_cache()
+    release_store_directory(tmp_path / "chroma")

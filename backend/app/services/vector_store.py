@@ -38,6 +38,64 @@ logger = logging.getLogger(__name__)
 
 UPSERT_BATCH_SIZE = 256
 MAX_TITLE_METADATA_CHARS = 500
+LOCK_FILENAME = ".researchpilot.lock"
+
+# Store directories this process has locked, with their open lock files (kept open for the process lifetime).
+_HELD_LOCKS: dict[str, Any] = {}
+_HELD_LOCKS_GUARD = threading.Lock()
+
+
+class VectorStoreInUseError(RuntimeError):
+    """Another process already has this vector store open."""
+
+
+def lock_store_directory(persist_dir: Path) -> None:
+    """Take an exclusive lock on a store directory for the rest of this process's life.
+
+    ChromaDB's persistent client is not safe for two processes at once: concurrent writers can corrupt the
+    index so badly that merely opening it later crashes Python. Several stores in one process are fine, and
+    the operating system releases the lock when the process exits, even after a crash.
+
+    Raises:
+        VectorStoreInUseError: If another process holds the lock.
+    """
+    persist_dir.mkdir(parents=True, exist_ok=True)
+    key = str(persist_dir.resolve())
+    with _HELD_LOCKS_GUARD:
+        if key in _HELD_LOCKS:
+            return
+        handle = open(persist_dir / LOCK_FILENAME, "a+b")  # noqa: SIM115 - must stay open to keep the lock
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            handle.close()
+            raise VectorStoreInUseError(
+                f"Another ResearchPilot process (the web app, the CLI or an evaluation) is using the vector store in "
+                f"{persist_dir}. ChromaDB cannot be shared safely between processes: stop the other process first."
+            ) from exc
+        _HELD_LOCKS[key] = handle
+
+
+def release_store_directory(persist_dir: Path) -> None:
+    """Give up this process's lock on a store directory (used by tests; normally it lasts until exit)."""
+    with _HELD_LOCKS_GUARD:
+        handle = _HELD_LOCKS.pop(str(persist_dir.resolve()), None)
+    if handle is None:
+        return
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    handle.close()
 
 
 class Embedder(Protocol):
@@ -193,8 +251,12 @@ class VectorStore:
     """Store and search paper chunks."""
 
     def __init__(self, persist_dir: Path, embedder: Embedder, collection_name: str | None = None) -> None:
-        """Open (or create) the persistent collection in ``persist_dir``."""
-        persist_dir.mkdir(parents=True, exist_ok=True)
+        """Open (or create) the persistent collection in ``persist_dir``.
+
+        Raises:
+            VectorStoreInUseError: If another process has the same directory open.
+        """
+        lock_store_directory(persist_dir)
         self._embedder = embedder
         # Writes can arrive from several Reader threads at once; serialise them.
         self._write_lock = threading.RLock()
