@@ -1,0 +1,36 @@
+# Render Blueprint for the ResearchPilot backend (the frontend is deployed on Vercel).
+# In Render: New -> Blueprint -> select this repository. Review the plan and disk size before
+# applying; see docs/deployment.md for the memory and storage the backend needs.
+services:
+  - type: web
+    name: researchpilot-api
+    runtime: docker
+    dockerContext: ./backend
+    dockerfilePath: ./backend/Dockerfile
+    # PyTorch + embedding model + ChromaDB need about 1 GB of RAM; pick an instance with >= 2 GB.
+    plan: standard
+    numInstances: 1
+    healthCheckPath: /api/health
+    disk:
+      name: researchpilot-data
+      mountPath: /data
+      sizeGB: 5
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DATA_DIR
+        value: /data
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: LLM_MODEL
+        value: claude-sonnet-5
+      - key: MAX_CONCURRENT_RUNS
+        value: "1"
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SEMANTIC_SCHOLAR_API_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: ALLOW_REGISTRATION
+        value: "true"

@@ -1,0 +1,35 @@
+# ResearchPilot backend dependencies (Python 3.11).
+# Versions are pinned to a set verified together on Windows 11 / Python 3.11.16.
+
+# ---- Web API ----
+fastapi==0.141.1
+uvicorn[standard]==0.54.0
+sse-starlette==3.4.11
+python-multipart==0.0.32
+pydantic==2.13.5
+pydantic-settings==2.15.0
+email-validator==2.3.0
+
+# ---- Auth ----
+python-jose[cryptography]==3.5.0
+passlib[bcrypt]==1.7.4
+# passlib 1.7.4 breaks with bcrypt>=4.1 (removed version attribute, strict 72-byte check)
+bcrypt==4.0.1
+
+# ---- Database ----
+SQLAlchemy==2.1.1
+
+# ---- LLM + agent orchestration ----
+anthropic==1.8.0
+langgraph==1.2.12
+
+# ---- Search, PDFs, retrieval ----
+httpx==0.28.1
+pymupdf==1.28.2
+chromadb==1.5.9
+sentence-transformers==6.1.0
+# CPU wheel is installed on Windows/macOS by default; the Dockerfile pulls the CPU-only Linux build
+torch==2.14.0
+
+# ---- Export ----
+reportlab==5.0.1

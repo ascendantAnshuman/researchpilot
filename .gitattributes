@@ -1,0 +1,6 @@
+# Store every text file with LF line endings: the Docker images and cloud hosts run Linux.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.pdf binary
