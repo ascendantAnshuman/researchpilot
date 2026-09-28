@@ -1,7 +1,7 @@
 """Turn eval/results.json into résumé bullets and a results paragraph - using your real numbers.
 
-    backend\\.venv\\Scripts\\python -m eval.deliverables                 # print to the terminal
-    backend\\.venv\\Scripts\\python -m eval.deliverables --out docs/my_results.md
+    .\\backend\\.venv\\Scripts\\python -m eval.deliverables                 # print to the terminal
+    .\\backend\\.venv\\Scripts\\python -m eval.deliverables --out docs/my_results.md
 
 Run it after ``python -m eval.run_eval``. The wording adapts to the measured
 result: if the Critic did not improve a metric, the text says so rather than

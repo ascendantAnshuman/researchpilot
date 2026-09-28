@@ -2,7 +2,7 @@
 
 Run from the project root with the backend's virtual environment, e.g. on Windows::
 
-    backend\\.venv\\Scripts\\python -m eval.run_eval --limit 2 --yes
+    .\\backend\\.venv\\Scripts\\python -m eval.run_eval --limit 2 --yes
 
 Importing this package puts ``backend/`` on ``sys.path`` so the ``app`` package
 (the pipeline itself) can be imported.

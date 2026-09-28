@@ -2,9 +2,9 @@
 
 Run from the project root (``researchpilot/``) with the backend's virtual environment::
 
-    backend\\.venv\\Scripts\\python -m eval.run_eval --limit 2 --yes      # quick trial (Windows)
-    backend\\.venv\\Scripts\\python -m eval.run_eval --yes                # all 25 questions
-    backend\\.venv\\Scripts\\python -m eval.run_eval --resume --yes       # continue after an interruption
+    .\\backend\\.venv\\Scripts\\python -m eval.run_eval --limit 2 --yes      # quick trial (Windows)
+    .\\backend\\.venv\\Scripts\\python -m eval.run_eval --yes                # all 25 questions
+    .\\backend\\.venv\\Scripts\\python -m eval.run_eval --resume --yes       # continue after an interruption
 
 Outputs (next to this file unless ``--output-dir`` is given):
     results.json   every measurement for every question, plus the summary

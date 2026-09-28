@@ -193,8 +193,8 @@ All settings live in `.env` (see [.env.example](.env.example) for every option w
   tabs: **Report**, **Papers**, **Verification** and **Chat**. Export it with the Markdown and PDF buttons.
 - **Command line:** run one question without the web app (from `backend/`):
   ```powershell
-  python -m app.agents.graph "What are recent methods for reducing hallucination in RAG systems?"
-  python -m app.agents.graph "..." --no-critic --top-n 6 --print
+  .\.venv\Scripts\python -m app.agents.graph "What are recent methods for reducing hallucination in RAG systems?"
+  .\.venv\Scripts\python -m app.agents.graph "..." --no-critic --top-n 6 --print
   ```
   Reports are saved as Markdown and JSON in `backend/data/runs/`.
 - **REST API:** interactive documentation at `/docs`; the endpoints are listed in [docs/architecture.md](docs/architecture.md#http-api).
@@ -215,15 +215,17 @@ All settings live in `.env` (see [.env.example](.env.example) for every option w
 Both arms share the same papers and evidence, so the difference isolates the Critic's effect. Results report
 paired differences with 95% bootstrap confidence intervals.
 
+Run these from the `researchpilot` folder (in PowerShell the leading `.\` is required):
+
 ```powershell
-cd researchpilot
-backend\.venv\Scripts\python -m eval.run_eval --limit 2 --yes          # quick trial on 2 questions
-backend\.venv\Scripts\python -m eval.run_eval --yes                    # all 25 questions
-backend\.venv\Scripts\python -m eval.run_eval --resume --yes           # continue after an interruption
-# free and consistent: one Gemma model for pipeline and judges, no fallback switching
-backend\.venv\Scripts\python -m eval.run_eval --no-fallback --pipeline-model gemma-4-31b-it --judge-model gemma-4-31b-it --top-n 6 --yes
-backend\.venv\Scripts\python -m eval.run_eval --pipeline-model claude-sonnet-5 --judge-model claude-opus-5 --yes   # paid Claude
-backend\.venv\Scripts\python -m eval.deliverables                      # resume bullets + results paragraph from your numbers
+# Free and consistent (used for the committed results): one fast free model for pipeline and judges
+.ackend\.venv\Scripts\python -m eval.run_eval --limit 2 --yes --no-fallback --pipeline-model gemini-3.5-flash-lite --judge-model gemini-3.5-flash-lite --top-n 6
+# the same command with --resume instead of --limit 2 runs the remaining questions (and continues the next day)
+.ackend\.venv\Scripts\python -m eval.run_eval --resume --yes --no-fallback --pipeline-model gemini-3.5-flash-lite --judge-model gemini-3.5-flash-lite --top-n 6
+# Paid Claude models instead
+.ackend\.venv\Scripts\python -m eval.run_eval --pipeline-model claude-sonnet-5 --judge-model claude-opus-5 --yes
+# Résumé bullets + results paragraph from your numbers
+.ackend\.venv\Scripts\python -m eval.deliverables
 ```
 
 Results are written to `eval/results.json` (all data) and `eval/results.md` (summary tables). Every question
@@ -234,21 +236,31 @@ model (the model pool otherwise switches models when a quota runs out).
 
 ## Testing
 
+Run from the `researchpilot` folder; the lines can be pasted as one block:
+
 ```powershell
-cd backend;  pytest                                              # 352 offline tests
-cd backend;  $env:RP_RUN_INTEGRATION="1"; pytest -m integration  # live arXiv / Semantic Scholar / PDF / model tests
-cd frontend; npm test; npm run lint; npm run typecheck; npm run build
+cd backend
+.\.venv\Scripts\python -m pytest             # 355 offline tests
+cd ..rontend
+npm test                                     # 30 Vitest tests
+npm run lint; npm run typecheck; npm run build
+cd ..
+# optional live tests (real arXiv / Semantic Scholar / PDFs / model; uses your API quota):
+# cd backend; $env:RP_RUN_INTEGRATION="1"; .\.venv\Scripts\python -m pytest -m integration; cd ..
 ```
 
-The offline tests replace Claude and the search APIs with fakes, including a deliberately planted false claim.
+The offline tests replace the language model and the search APIs with fakes, including a deliberately planted false claim.
 That lets them check the whole pipeline end to end: the Critic catching the claim, the revision removing it,
 and the API streaming it all.
 
 ## Cost and rate limits
 
-- A research run makes roughly 15–25 Claude calls: planning, one extraction per paper, drafting, claim
-  splitting and verification (twice if a revision happens). The terminal summary, the report header and the
-  evaluation all show the **actual** cost; check it on a first run before running the full evaluation.
+- A research run makes roughly 15–25 model calls: planning, one extraction per paper, drafting, claim
+  splitting and verification (twice if a revision happens). On the free Gemini tier this costs $0; each Flash
+  model allows about 20 requests per day, so the model pool (`LLM_FALLBACK_MODEL`) moves to the next model
+  when one runs out. Quotas reset at midnight Pacific time (12:30 or 13:30 in India).
+- With paid Claude models, the terminal summary, the report header and the evaluation all show the **actual**
+  cost; check it on a first run before running the full evaluation.
 - New Anthropic accounts have low rate limits. If runs fail with "temporarily unavailable", set
   `LLM_MAX_CONCURRENCY=1` and `MAX_CONCURRENT_RUNS=1`.
 
