@@ -33,13 +33,13 @@ flowchart TB
             SYNTH -.->|"critic disabled<br/>(ablation)"| FINAL
         end
 
-        LLM["llm.py<br/>Claude wrapper: retries, JSON, cost"]
+        LLM["llm.py<br/>LLM gateway: model pool, retries, JSON, cost"]
         VS["vector_store.py<br/>MiniLM embeddings on CPU"]
     end
 
     ARXIV[("arXiv API")]
     S2[("Semantic Scholar API")]
-    CLAUDE[("Anthropic Claude API")]
+    CLAUDE[("LLM API<br/>Google Gemini (free) or Anthropic Claude")]
     SQL[("SQLite<br/>users, sessions, reports")]
     CHROMA[("ChromaDB<br/>paper chunks + metadata")]
 
@@ -154,7 +154,7 @@ sequenceDiagram
 | `vector_store.py` | Persistent ChromaDB collection plus MiniLM embedder: add and query chunks per session. |
 | `run_manager.py` | Runs pipelines in the background (queued beyond `MAX_CONCURRENT_RUNS`), keeps each run's event history and fans events out to SSE subscribers. |
 | `session_store.py` | All database reads/writes for sessions, reports, papers and chat, always scoped to the owning user. |
-| `chat_service.py` | Follow-up Q&A: retrieves the session's chunks, asks Claude with [E#] citations, maps them to the report's [n] numbers. |
+| `chat_service.py` | Follow-up Q&A: retrieves the session's chunks, asks the LLM with [E#] citations, maps them to the report's [n] numbers. |
 | `export.py` | Renders a report to Markdown and PDF (ReportLab, Unicode font when available). |
 
 `app/deps.py` holds shared FastAPI dependencies (run manager, vector store, chat LLM), which tests override with fakes.
@@ -198,7 +198,7 @@ sequenceDiagram
    specific stored chunk, so the Critic and the citation-accuracy metric can check the exact
    text a sentence relies on.
 2. **Embedding window vs. chunk size.** `all-MiniLM-L6-v2` reads at most 256 word-pieces,
-   but chunks are ~800 tokens so that Claude gets enough context. Each chunk is embedded
+   but chunks are ~800 tokens so that the LLM gets enough context. Each chunk is embedded
    as the mean of its ≤256-token windows, so the whole chunk counts for retrieval.
 3. **One LLM gateway (`llm.py`).** Swapping models is a one-line `.env` change, and every
    call is retried the same way and metered the same way (tokens and cost), which is what

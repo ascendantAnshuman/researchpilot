@@ -84,7 +84,9 @@ FALLBACK_MODELS: frozenset[str] = frozenset({"claude-opus-5", "claude-fable-5-1"
 GEMINI_RETRY_STATUS_CODES = [408, 500, 502, 503, 504]
 GEMINI_REFUSAL_REASONS = frozenset({"SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "RECITATION"})
 _RETRY_DELAY_RE = re.compile(r"retryDelay['\"]?\s*:\s*['\"]?(\d+(?:\.\d+)?)s")
-MAX_FAILOVER_ROUNDS = 3
+_QUOTA_ID_RE = re.compile(r"quotaId['\"]?\s*:\s*['\"]([A-Za-z0-9_-]+)")
+MAX_FAILOVER_ROUNDS = 3  # rounds allowed while models are overloaded (503) or unreachable
+MAX_RATE_LIMITED_ROUNDS = 8  # per-minute limits clear within a minute, so they may be waited out longer
 MAX_RATE_LIMIT_WAIT_SECONDS = 60.0
 
 
@@ -99,6 +101,7 @@ class QuotaRegistry:
     def __init__(self) -> None:
         """Start with no exhausted models."""
         self._exhausted: dict[str, date] = {}
+        self._missing: set[str] = set()
         self._lock = threading.Lock()
 
     @staticmethod
@@ -111,14 +114,24 @@ class QuotaRegistry:
         with self._lock:
             self._exhausted[model] = self.quota_day()
 
+    def mark_missing(self, model: str) -> None:
+        """Record that ``model`` does not exist for this key (HTTP 404), so it is never tried again."""
+        with self._lock:
+            self._missing.add(model)
+
+    def is_missing(self, model: str) -> bool:
+        """Whether ``model`` was reported as not found."""
+        return model in self._missing
+
     def is_exhausted(self, model: str) -> bool:
-        """Whether ``model`` already used up today's quota."""
-        return self._exhausted.get(model) == self.quota_day()
+        """Whether ``model`` cannot be used today (daily quota used up, or the model does not exist)."""
+        return model in self._missing or self._exhausted.get(model) == self.quota_day()
 
     def reset(self) -> None:
         """Forget everything (used by tests)."""
         with self._lock:
             self._exhausted.clear()
+            self._missing.clear()
 
 
 QUOTAS = QuotaRegistry()
@@ -158,6 +171,10 @@ class LLMError(RuntimeError):
 
 class LLMConfigurationError(LLMError):
     """Missing/invalid API key or unknown model: retrying will not help."""
+
+
+class LLMModelNotFoundError(LLMConfigurationError):
+    """The model name does not exist, or is no longer offered to this API key (HTTP 404)."""
 
 
 class LLMUnavailableError(LLMError):
@@ -413,7 +430,9 @@ class _AnthropicBackend:
         except anthropic.PermissionDeniedError as exc:
             raise LLMConfigurationError(f"The API key cannot use model {self.model!r}") from exc
         except anthropic.NotFoundError as exc:
-            raise LLMConfigurationError(f"Model {self.model!r} was not found - check LLM_MODEL") from exc
+            raise LLMModelNotFoundError(
+                f"Model {self.model!r} was not found - check LLM_MODEL and LLM_FALLBACK_MODEL"
+            ) from exc
         except anthropic.BadRequestError as exc:
             raise LLMError(f"{stage}: request rejected by the API: {exc.message}") from exc
         except (anthropic.RateLimitError, anthropic.InternalServerError, anthropic.APIConnectionError) as exc:
@@ -535,13 +554,18 @@ class _GeminiBackend:
                     raise LLMQuotaExhaustedError(
                         f"{stage}: {self.model} has used up its free daily quota (resets at midnight Pacific time)"
                     ) from exc
+                quota = _QUOTA_ID_RE.search(text)
                 raise LLMRateLimitedError(
-                    f"{stage}: {self.model} hit its free-tier per-minute limit", retry_after=retry_delay_seconds(text) or 15.0
+                    f"{stage}: {self.model} hit its free-tier per-minute limit"
+                    + (f" ({quota.group(1)})" if quota else ""),
+                    retry_after=retry_delay_seconds(text) or 15.0,
                 ) from exc
             if code in (401, 403) or "API_KEY_INVALID" in text or "API key not valid" in text:
                 raise LLMConfigurationError("GEMINI_API_KEY was rejected - check the key in .env") from exc
             if code == 404:
-                raise LLMConfigurationError(f"Gemini model {self.model!r} was not found - check LLM_MODEL") from exc
+                raise LLMModelNotFoundError(
+                    f"Gemini model {self.model!r} was not found - check LLM_MODEL and LLM_FALLBACK_MODEL"
+                ) from exc
             raise LLMError(f"{stage}: request rejected by Gemini: {text}") from exc
         except errors.ServerError as exc:
             raise LLMUnavailableError(f"{stage}: Gemini is unavailable after retries ({exc})") from exc
@@ -789,15 +813,24 @@ class LLMClient:
         """Try the models in order, skipping exhausted ones, until one answers.
 
         * Daily quota used up -> remember it (process-wide) and move to the next model.
+        * Model not found (HTTP 404) while other models remain -> skip it for good, with a warning.
         * Per-minute limit or overload -> move to the next model; if every model is
           busy, wait for the shortest ``retryDelay`` and try another round.
 
         Raises:
-            LLMUnavailableError: If no model answered within ``MAX_FAILOVER_ROUNDS`` rounds,
-                or every model's daily quota is used up.
+            LLMModelNotFoundError: If the only model, or every model, does not exist for this key.
+            LLMUnavailableError: If no model answered within ``MAX_FAILOVER_ROUNDS`` rounds of
+                overload (``MAX_RATE_LIMITED_ROUNDS`` of per-minute limits), or every model's
+                daily quota is used up.
         """
         last_error: LLMUnavailableError | None = None
-        for round_number in range(1, MAX_FAILOVER_ROUNDS + 1):
+        overloaded_rounds = 0
+        for round_number in range(1, MAX_RATE_LIMITED_ROUNDS + 1):
+            if all(QUOTAS.is_missing(backend.model) for backend in self._backends):
+                raise LLMModelNotFoundError(
+                    f"None of the configured models exist for this API key ({', '.join(self.models)}) - "
+                    "check LLM_MODEL and LLM_FALLBACK_MODEL"
+                )
             available = [backend for backend in self._backends if not QUOTAS.is_exhausted(backend.model)]
             if not available:
                 raise LLMUnavailableError(
@@ -805,25 +838,38 @@ class LLMClient:
                     "Quotas reset at midnight Pacific time; add more models to LLM_FALLBACK_MODEL or continue tomorrow."
                 )
             waits: list[float] = []
-            for backend in available:
+            overloaded = False
+            for index, backend in enumerate(available):
+                next_step = "trying the next model" if index + 1 < len(available) else "waiting"
                 limiter = limiter_for(backend.model, self.settings.llm_requests_per_minute)
                 if limiter is not None:
                     await limiter.wait()
                 try:
                     return await backend.complete(**request)
+                except LLMModelNotFoundError:
+                    if len(self._backends) == 1:
+                        raise
+                    QUOTAS.mark_missing(backend.model)
+                    logger.warning("%s: model %s is not available to this API key (HTTP 404); skipping it - "
+                                   "remove it from LLM_MODEL / LLM_FALLBACK_MODEL", stage, backend.model)
                 except LLMQuotaExhaustedError as exc:
                     QUOTAS.mark_exhausted(backend.model)
                     logger.warning("%s: %s used up its daily quota; switching model", stage, backend.model)
                     last_error = exc
                 except LLMRateLimitedError as exc:
-                    logger.info("%s: %s is rate limited (retry in %.0fs); trying the next model", stage,
-                                backend.model, exc.retry_after)
+                    logger.info("%s: %s is rate limited (retry in %.0fs); %s", stage, backend.model,
+                                exc.retry_after, next_step)
                     waits.append(exc.retry_after)
                     last_error = exc
                 except LLMUnavailableError as exc:
-                    logger.warning("%s: %s unavailable (%s); trying the next model", stage, backend.model, exc)
-                    waits.append(5.0 * round_number)
+                    logger.warning("%s: %s unavailable (%s); %s", stage, backend.model, exc, next_step)
+                    overloaded = True
+                    waits.append(5.0 * (overloaded_rounds + 1))
                     last_error = exc
-            if round_number < MAX_FAILOVER_ROUNDS and waits:
-                await http_utils._sleep(min(max(min(waits), 1.0), MAX_RATE_LIMIT_WAIT_SECONDS))
-        raise LLMUnavailableError(f"{stage}: no model could answer after {MAX_FAILOVER_ROUNDS} rounds ({last_error})")
+            if not waits:
+                continue  # Every remaining model just ran out of daily quota: the next round reports it.
+            overloaded_rounds += overloaded
+            if overloaded_rounds >= MAX_FAILOVER_ROUNDS or round_number == MAX_RATE_LIMITED_ROUNDS:
+                break
+            await http_utils._sleep(min(max(min(waits), 1.0), MAX_RATE_LIMIT_WAIT_SECONDS))
+        raise LLMUnavailableError(f"{stage}: no model could answer after {round_number} rounds ({last_error})")

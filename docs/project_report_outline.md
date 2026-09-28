@@ -15,7 +15,7 @@ Write it last. Cover, in order:
 1. **Problem:** literature reviews are slow to write, and LLM-written summaries hallucinate facts and citations.
 2. **Approach:** ResearchPilot, a multi-agent system (Planner, Search, Reader, Synthesizer, Critic) that grounds
    every sentence in retrieved passages from real papers and verifies each claim before the report is shown.
-3. **Implementation:** LangGraph orchestration, Claude API, ChromaDB + MiniLM retrieval, FastAPI + Next.js web app
+3. **Implementation:** LangGraph orchestration, LLM gateway (free Gemini tier, optional Claude), ChromaDB + MiniLM retrieval, FastAPI + Next.js web app
    with live progress streaming.
 4. **Evaluation:** 25 research questions; citation accuracy, faithfulness, relevance, latency and cost; a paired
    ablation of the Critic agent.
@@ -58,7 +58,8 @@ Group the related work, and end each group with how ResearchPilot differs.
 - **Functional requirements:** authentication; start a research run; live progress; report with themed sections,
   comparison table and citations; verification panel; follow-up chat; Markdown/PDF export; history; delete.
 - **Non-functional requirements:** runs on an 8–16 GB laptop without a GPU; failures are handled gracefully;
-  secrets stay in `.env`; every table is scoped to its user; tested (340+ automated tests).
+  secrets stay in `.env`; every table is scoped to its user; runs for free on the Gemini free tier (quota-aware
+  model pool); tested (380+ automated tests).
 - **Use-case diagram**, and a short feasibility and cost analysis (API cost per question from the evaluation).
 
 ## 4. System Architecture
@@ -69,8 +70,9 @@ Group the related work, and end each group with how ResearchPilot differs.
 - **Data model:** ER diagram of `users`, `research_sessions`, `reports`, `session_papers`, `chat_messages`
   (`backend/app/models.py`).
 - **API design:** the endpoint table (`docs/architecture.md` → HTTP API).
-- **Technology choices and why:** LangGraph (explicit, testable control flow); Claude structured outputs
-  (validated JSON); ChromaDB + MiniLM (free, local, CPU); FastAPI (async + SSE); Next.js.
+- **Technology choices and why:** LangGraph (explicit, testable control flow); schema-constrained LLM outputs
+  (validated JSON, Gemini `response_schema` / Claude structured outputs); free Gemini tier with a quota-aware
+  model pool (cost $0); ChromaDB + MiniLM (free, local, CPU); FastAPI (async + SSE); Next.js.
 
 ## 5. Module Design (one subsection per module)
 For each module give: its purpose, inputs and outputs, the algorithm, and the failure handling.

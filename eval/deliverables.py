@@ -17,9 +17,15 @@ from pathlib import Path
 from typing import Any
 
 from eval import EVAL_DIR
+from app.config import GOOGLE_MODEL_PREFIXES
 from eval.metrics import EvalRun
 
 MIN_RELIABLE_QUESTIONS = 10
+
+
+def _llm_api(model: str) -> str:
+    """The API behind a model name, for the résumé wording."""
+    return "Google Gemini API" if model.strip().lower().startswith(GOOGLE_MODEL_PREFIXES) else "Claude API"
 
 
 def _pct(value: float) -> str:
@@ -67,8 +73,8 @@ def resume_bullets(run: EvalRun) -> list[str]:
     effect_text = " and ".join(critic_effects) if critic_effects else "was measured on faithfulness and citation accuracy"
 
     bullets = [
-        "Built ResearchPilot, a multi-agent research copilot (LangGraph, FastAPI, Next.js, Claude API) in which "
-        "Planner, Search, Reader, Synthesizer and Critic agents turn a research question into a cited, fact-checked "
+        f"Built ResearchPilot, a multi-agent research copilot (LangGraph, FastAPI, Next.js, {_llm_api(run.pipeline_model)}) "
+        "in which Planner, Search, Reader, Synthesizer and Critic agents turn a research question into a cited, fact-checked "
         "literature review from arXiv and Semantic Scholar papers, with live agent progress streamed over SSE.",
         f"Designed a Critic agent that verifies every atomic claim against its source passages and triggers a revision; "
         f"in a paired ablation over {questions} research questions it {effect_text}.",
@@ -79,16 +85,19 @@ def resume_bullets(run: EvalRun) -> list[str]:
         "unreadable PDFs"
     ]
     if latency and cost:
+        per_query = (
+            f"${cost['with_critic_mean']:.2f} per query" if cost["with_critic_mean"] > 0 else "$0 on the free API tier"
+        )
         pipeline_parts.append(
             f"averaging {summary.get('mean_papers', 0):.1f} papers per question, "
-            f"{latency['with_critic_mean']:.0f} s end-to-end and ${cost['with_critic_mean']:.2f} per query"
+            f"{latency['with_critic_mean']:.0f} s end-to-end and {per_query}"
         )
     bullets.append(", ".join(pipeline_parts) + ".")
     relevance_text = f" (answer relevance {relevance['with_critic_mean']:.2f}/5)" if relevance else ""
     bullets.append(
         "Built an automated evaluation harness with LLM-as-judge metrics for citation accuracy, faithfulness and "
-        f"relevance{relevance_text} and bootstrap confidence intervals; shipped with 340+ automated tests "
-        "(pytest, Vitest), Docker Compose and a Vercel + Railway deployment."
+        f"relevance{relevance_text} and bootstrap confidence intervals; shipped with 380+ automated tests "
+        "(pytest, Vitest), CI, Docker Compose and deployment configs for Vercel and Render/Railway."
     )
     return bullets
 

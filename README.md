@@ -32,7 +32,7 @@ flowchart LR
     R --> V[(ChromaDB<br/>MiniLM embeddings)]
     SY --> V
     C --> V
-    API --> CL[(Claude API)]
+    API --> CL[("LLM API<br/>Gemini free tier or Claude")]
     API --> DB[(SQLite)]
 ```
 
@@ -160,7 +160,7 @@ All settings live in `.env` (see [.env.example](.env.example) for every option w
 |---|---|---|
 | `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` | – | Key for the provider of `LLM_MODEL`; required for research, chat and evaluation. |
 | `LLM_MODEL` | `gemini-3.8-flash` (in `.env.example`) | Model used by every agent. `gemini-*` uses Google's free tier; `claude-*` uses paid Anthropic models (e.g. `claude-opus-5`, or `claude-sonnet-5` at ~40% of its price). |
-| `LLM_FALLBACK_MODEL` | seven free Gemini models + Gemma (in `.env.example`) | Comma-separated models tried in order when the main one is overloaded (HTTP 503), rate limited, or out of its daily free quota (HTTP 429). Exhausted models are skipped until the quota resets, so each model's separate free quota adds up. |
+| `LLM_FALLBACK_MODEL` | six free Gemini models + Gemma (in `.env.example`) | Comma-separated models tried in order when the main one is overloaded (HTTP 503), rate limited, or out of its daily free quota (HTTP 429). Exhausted models are skipped until the quota resets, so each model's separate free quota adds up. |
 | `LLM_REQUESTS_PER_MINUTE` | `5` (in `.env.example`) | Paces calls per model to stay under free-tier per-minute limits (`0` = unlimited). |
 | `LLM_EFFORT` | `high` | Reasoning effort (`low` … `max`); simple extraction calls automatically use at most `medium`. |
 | `JWT_SECRET_KEY` | random per process | Set it, or logins reset on every restart. Required in production. |
@@ -205,12 +205,17 @@ cd researchpilot
 backend\.venv\Scripts\python -m eval.run_eval --limit 2 --yes          # quick trial on 2 questions
 backend\.venv\Scripts\python -m eval.run_eval --yes                    # all 25 questions
 backend\.venv\Scripts\python -m eval.run_eval --resume --yes           # continue after an interruption
-backend\.venv\Scripts\python -m eval.run_eval --pipeline-model claude-sonnet-5 --judge-model claude-opus-5 --yes
+# free and consistent: one Gemma model for pipeline and judges, no fallback switching
+backend\.venv\Scripts\python -m eval.run_eval --no-fallback --pipeline-model gemma-4-31b-it --judge-model gemma-4-31b-it --top-n 6 --yes
+backend\.venv\Scripts\python -m eval.run_eval --pipeline-model claude-sonnet-5 --judge-model claude-opus-5 --yes   # paid Claude
 backend\.venv\Scripts\python -m eval.deliverables                      # resume bullets + results paragraph from your numbers
 ```
 
 Results are written to `eval/results.json` (all data) and `eval/results.md` (summary tables). Every question
-costs one full pipeline run plus judging, so start with `--limit 2` and check the cost it reports.
+costs one full pipeline run plus judging, so start with `--limit 2` and check the cost it reports. On the free
+tier a question takes a few dozen model calls; when every model's daily quota is used up the runner saves and
+stops, and `--resume` the next day continues where it left off. Use `--no-fallback` so all numbers come from one
+model (the model pool otherwise switches models when a quota runs out).
 
 ## Testing
 

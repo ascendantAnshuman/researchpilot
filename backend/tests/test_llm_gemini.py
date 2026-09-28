@@ -247,6 +247,16 @@ def test_retry_delay_is_read_from_the_error() -> None:
     assert retry_delay_seconds("no delay here") is None
 
 
+async def test_rate_limit_error_names_the_quota_that_was_hit(
+    test_settings: Settings, recorded_sleeps: list[float]
+) -> None:
+    """The error says which free-tier limit was reached (requests or tokens per minute)."""
+    client = LLMClient(gemini_settings(test_settings), client=FakeGemini(quota_error("Minute", "1s")))
+
+    with pytest.raises(LLMUnavailableError, match=r"per-minute limit \(GenerateRequestsPerMinutePerProjectPerModel"):
+        await client.text(stage="s", system="s", messages=[{"role": "user", "content": "q"}])
+
+
 async def test_daily_quota_is_remembered_and_the_model_skipped(test_settings: Settings) -> None:
     """After a per-day 429 the model is skipped for later calls - no wasted requests."""
     fake = FakeGemini(quota_error("Day"), fake_gemini_response("first"), fake_gemini_response("second"))
@@ -283,6 +293,50 @@ async def test_when_all_models_are_busy_the_client_waits_for_the_retry_delay(
     assert await client.text(stage="s", system="s", messages=[{"role": "user", "content": "q"}]) == "done"
     assert recorded_sleeps == [7.0]
     assert [request["model"] for request in fake.requests] == ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.8-flash"]
+
+
+async def test_a_single_rate_limited_model_is_waited_out_longer_than_an_overloaded_one(
+    test_settings: Settings, recorded_sleeps: list[float]
+) -> None:
+    """Per-minute limits clear within a minute, so one model may wait up to 8 rounds; 503s stop after 3."""
+    busy = [quota_error("Minute", "20s")] * 5
+    patient = LLMClient(gemini_settings(test_settings, model="gemma-4-31b-it"),
+                        client=FakeGemini(*busy, fake_gemini_response("finally")))
+    assert await patient.text(stage="s", system="s", messages=[{"role": "user", "content": "q"}]) == "finally"
+    assert recorded_sleeps == [20.0] * 5
+
+    always_limited = FakeGemini(quota_error("Minute", "1s"))
+    with pytest.raises(LLMUnavailableError, match="after 8 rounds"):
+        await LLMClient(gemini_settings(test_settings), client=always_limited).text(
+            stage="s", system="s", messages=[{"role": "user", "content": "q"}]
+        )
+    assert len(always_limited.requests) == 8
+
+    overloaded = FakeGemini(errors.ServerError(503, {"error": {"code": 503, "message": "busy", "status": "UNAVAILABLE"}}))
+    with pytest.raises(LLMUnavailableError, match="after 3 rounds"):
+        await LLMClient(gemini_settings(test_settings), client=overloaded).text(
+            stage="s", system="s", messages=[{"role": "user", "content": "q"}]
+        )
+    assert len(overloaded.requests) == 3
+
+
+async def test_a_retired_fallback_model_is_skipped_but_a_retired_main_model_is_an_error(
+    test_settings: Settings,
+) -> None:
+    """A 404 ("no longer available to new users") on one pool model skips it for good; alone it is fatal."""
+    retired = client_error(404, "This model is no longer available to new users.", "NOT_FOUND")
+    fake = FakeGemini(retired, fake_gemini_response("first"), fake_gemini_response("second"))
+    pool = LLMClient(gemini_settings(test_settings, llm_fallback_model="gemini-3.6-flash"), client=fake)
+
+    assert await pool.text(stage="s", system="s", messages=[{"role": "user", "content": "1"}]) == "first"
+    assert await pool.text(stage="s", system="s", messages=[{"role": "user", "content": "2"}]) == "second"
+    assert [request["model"] for request in fake.requests] == ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.6-flash"]
+    assert QUOTAS.is_missing("gemini-3.8-flash")
+
+    with pytest.raises(LLMConfigurationError, match="LLM_FALLBACK_MODEL"):
+        await LLMClient(gemini_settings(test_settings, model="gemini-2.5-flash-lite"), client=FakeGemini(retired)).text(
+            stage="s", system="s", messages=[{"role": "user", "content": "q"}]
+        )
 
 
 async def test_all_daily_quotas_used_up_gives_a_clear_message(test_settings: Settings) -> None:

@@ -72,6 +72,6 @@ Click **PDF**:
 
 ## Likely follow-up while you are demoing
 - *"What if a paper is paywalled?"* → The Reader falls back to the abstract, and the Papers tab says "Abstract only".
-- *"Is this expensive?"* → The report header shows the exact Claude API cost of the run.
+- *"Is this expensive?"* → It runs on Google's free Gemini tier, so the report header shows $0.00; with a paid Claude model the header shows the exact API cost of the run.
 - *"Can it make things up?"* → Show a removed or partially supported claim in the Verification tab, and explain the
   judges' limitations (see `docs/viva_questions.md`, Q5).

@@ -54,12 +54,12 @@ def load_questions(path: Path) -> list[Question]:
 
 
 def make_pipeline_llm(settings: Settings) -> LLM:
-    """The Claude client used by the pipeline (a new one per question, so costs are per question)."""
+    """The LLM client used by the pipeline (a new one per question, so costs are per question)."""
     return LLMClient(settings)
 
 
 def make_judge_llm(settings: Settings) -> LLM:
-    """The Claude client used by the judges."""
+    """The LLM client used by the judges."""
     return LLMClient(settings)
 
 
@@ -203,7 +203,7 @@ def confirm(question_count: int, pipeline_model: str, judge_model: str) -> bool:
     prompt = (
         f"\nAbout to evaluate {question_count} question(s): one full pipeline run plus judging per question.\n"
         f"Pipeline model: {pipeline_model} | Judge model: {judge_model}\n"
-        "This calls the Claude API and costs real money. Continue? [y/N] "
+        "Paid models (Claude) cost real money; free Gemini models use up your daily free quota. Continue? [y/N] "
     )
     try:
         return input(prompt).strip().lower() in {"y", "yes"}

@@ -299,7 +299,7 @@ def render_markdown(run: EvalRun) -> str:
         "- **Faithfulness:** share of atomic claims in the final report labelled *supported* when verified against",
         "  the source passages with the Critic's claim-splitting and verification procedure (applied to both arms).",
         "- **Answer relevance:** LLM-judge score from 1 (irrelevant) to 5 (answers the question completely).",
-        "- **Latency / cost:** wall-clock time and Claude API cost of the pipeline for one question (judging excluded).",
+        "- **Latency / cost:** wall-clock time and API cost ($0 on free tiers) of the pipeline for one question (judging excluded).",
         "  For the *without Critic* arm these stop at the first draft.",
         "",
         "## Threats to validity",

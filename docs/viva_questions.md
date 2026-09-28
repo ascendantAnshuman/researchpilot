@@ -48,7 +48,7 @@ every chunk. I split each chunk into model-sized windows, embed each window, ave
 (`services/vector_store.py`)
 
 **7. Why chunks of 800 tokens with 100 overlap?**
-Large enough that a chunk contains a complete argument or result for Claude to read and cite; small enough that
+Large enough that a chunk contains a complete argument or result for the LLM to read and cite; small enough that
 ~24 chunks from 10 papers fit comfortably in one prompt. The overlap keeps an idea from being cut in half at a
 boundary. Chunks follow sentence boundaries and never cross section boundaries, so each citation points to one
 section and page range. (`services/pdf_parser.py`)
