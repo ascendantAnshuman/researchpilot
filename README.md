@@ -82,7 +82,7 @@ researchpilot/
 │   ├── app/
 │   │   ├── main.py            FastAPI app factory, start-up/shutdown
 │   │   ├── config.py          all settings, read from .env
-│   │   ├── llm.py             the only module that calls Claude
+│   │   ├── llm.py             the only module that calls the LLM (Gemini free tier or Claude; model pool)
 │   │   ├── db.py, models.py   SQLAlchemy engine and tables
 │   │   ├── schemas.py         Pydantic request/response and domain models
 │   │   ├── auth.py            bcrypt + JWT
@@ -100,6 +100,7 @@ researchpilot/
 │   └── Dockerfile
 ├── eval/                      25 benchmark questions, judges, paired Critic ablation, run_eval CLI
 ├── docs/                      architecture.md, deployment.md, sample_report.md, screenshots/, report/viva material
+├── start.bat, start.ps1        one-command local start (Windows)
 ├── docker-compose.yml, render.yaml, .env.example
 └── README.md
 ```
@@ -109,6 +110,20 @@ researchpilot/
 You need **one** language-model key: a **free Google Gemini key** (<https://aistudio.google.com/apikey>,
 Google account, no card) or a paid Anthropic key (<https://console.anthropic.com>). A free **Semantic Scholar API key** is
 strongly recommended (<https://www.semanticscholar.org/product/api#api-key-form>).
+
+### Fastest – one command on Windows
+
+Requires Python 3.11 and Node.js 18.18+. Double-click **`start.bat`**, or in PowerShell:
+
+```powershell
+cd researchpilot
+.\start.bat            # development server
+.\start.bat -Prod      # optimised production build
+```
+
+The first run creates `.env` (add your free `GEMINI_API_KEY` there and run it again), the Python virtual
+environment and all packages. Every run then opens the backend and the website in two windows and opens
+<http://localhost:3000> in your browser. Close the two windows to stop it.
 
 ### Option A – Docker (one command)
 
