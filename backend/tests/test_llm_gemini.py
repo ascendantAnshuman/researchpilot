@@ -15,9 +15,11 @@ from app.llm import (
     LLMError,
     LLMOutputError,
     LLMRefusalError,
+    QUOTAS,
     LLMUnavailableError,
     gemini_thinking_level,
     model_prices,
+    retry_delay_seconds,
 )
 from tests.fakes import FakeGemini, fake_gemini_response
 
@@ -36,6 +38,23 @@ def gemini_settings(test_settings: Settings, model: str = "gemini-3.8-flash", **
 def client_error(code: int, message: str, status: str) -> errors.ClientError:
     """A 4xx error as the SDK raises it."""
     return errors.ClientError(code, {"error": {"code": code, "message": message, "status": status}})
+
+
+def quota_error(per: str, retry_delay: str = "7s") -> errors.ClientError:
+    """A free-tier 429 exactly as Gemini reports it (quota id + retry delay in the details)."""
+    return errors.ClientError(429, {"error": {
+        "code": 429,
+        "message": "You exceeded your current quota.",
+        "status": "RESOURCE_EXHAUSTED",
+        "details": [
+            {"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [{
+                "quotaMetric": "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+                "quotaId": f"GenerateRequestsPer{per}PerProjectPerModel-FreeTier",
+                "quotaValue": "20" if per == "Day" else "5",
+            }]},
+            {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": retry_delay},
+        ],
+    }})
 
 
 def test_provider_is_chosen_from_the_model_name(test_settings: Settings) -> None:
@@ -132,7 +151,7 @@ async def test_bad_endings_raise_clear_errors(test_settings: Settings, response:
 @pytest.mark.parametrize(
     ("exception", "expected", "message"),
     [
-        (client_error(429, "Resource has been exhausted", "RESOURCE_EXHAUSTED"), LLMUnavailableError, "free-tier"),
+        (client_error(429, "Resource has been exhausted", "RESOURCE_EXHAUSTED"), LLMUnavailableError, "per-minute"),
         (client_error(400, "API key not valid. Please pass a valid API key.", "INVALID_ARGUMENT"),
          LLMConfigurationError, "GEMINI_API_KEY"),
         (client_error(403, "Permission denied", "PERMISSION_DENIED"), LLMConfigurationError, "GEMINI_API_KEY"),
@@ -144,7 +163,7 @@ async def test_bad_endings_raise_clear_errors(test_settings: Settings, response:
     ],
 )
 async def test_sdk_errors_are_translated(
-    test_settings: Settings, exception: Exception, expected: type[Exception], message: str
+    test_settings: Settings, exception: Exception, expected: type[Exception], message: str, recorded_sleeps: list[float]
 ) -> None:
     """Every SDK failure maps to a readable pipeline error (after the SDK's own retries)."""
     client = LLMClient(gemini_settings(test_settings), client=FakeGemini(exception))
@@ -162,6 +181,108 @@ async def test_requests_per_minute_limit_spaces_out_calls(test_settings: Setting
     await client.text(stage="s", system="s", messages=[{"role": "user", "content": "2"}])
 
     assert recorded_sleeps == [pytest.approx(2.0, abs=0.2)]
+
+
+async def test_overloaded_model_falls_back_to_the_second_model(test_settings: Settings) -> None:
+    """With LLM_FALLBACK_MODEL set, a 503 on the main model is retried once on the fallback model."""
+    overloaded = errors.ServerError(503, {"error": {"code": 503, "message": "high demand", "status": "UNAVAILABLE"}})
+    fake = FakeGemini(overloaded, fake_gemini_response('{"value": "from fallback"}'))
+    client = LLMClient(gemini_settings(test_settings, llm_fallback_model="gemini-3.6-flash"), client=fake)
+
+    answer = await client.structured(stage="reader", system="s", messages=[{"role": "user", "content": "q"}],
+                                     output_model=Answer)
+
+    assert answer.value == "from fallback"
+    assert [request["model"] for request in fake.requests] == ["gemini-3.8-flash", "gemini-3.6-flash"]
+    assert client.tracker.stages["reader"].calls == 1
+
+
+async def test_quota_errors_also_use_the_fallback_but_config_errors_do_not(test_settings: Settings) -> None:
+    """Quota (429) moves to the fallback model; a rejected key does not (it would fail there too)."""
+    quota = client_error(429, "Resource has been exhausted", "RESOURCE_EXHAUSTED")
+    bad_key = client_error(400, "API key not valid", "INVALID_ARGUMENT")
+    settings = gemini_settings(test_settings, llm_fallback_model="gemini-3.6-flash")
+
+    recovered = LLMClient(settings, client=FakeGemini(quota, fake_gemini_response("ok")))
+    assert await recovered.text(stage="s", system="s", messages=[{"role": "user", "content": "q"}]) == "ok"
+
+    with pytest.raises(LLMConfigurationError):
+        await LLMClient(settings, client=FakeGemini(bad_key)).text(
+            stage="s", system="s", messages=[{"role": "user", "content": "q"}]
+        )
+
+
+def test_fallback_from_another_provider_is_ignored(test_settings: Settings) -> None:
+    """A Claude fallback for a Gemini model cannot share the client, so it is ignored."""
+    client = LLMClient(gemini_settings(test_settings, llm_fallback_model="claude-sonnet-5"), client=FakeGemini())
+
+    assert client.models == ["gemini-3.8-flash"]
+
+
+def test_fallback_models_accept_a_comma_separated_list(test_settings: Settings) -> None:
+    """LLM_FALLBACK_MODEL may list several models; duplicates and the main model are dropped."""
+    settings = gemini_settings(
+        test_settings, llm_fallback_model="gemini-3.6-flash, gemini-3.8-flash,gemini-3.5-flash-lite,gemini-3.6-flash"
+    )
+
+    assert settings.llm_fallback_models == ["gemini-3.6-flash", "gemini-3.5-flash-lite"]
+    assert LLMClient(settings, client=FakeGemini()).models == [
+        "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite",
+    ]
+
+
+def test_retry_delay_is_read_from_the_error() -> None:
+    """Gemini's RetryInfo delay is parsed from the error text."""
+    assert retry_delay_seconds(str(quota_error("Minute", "35s"))) == 35.0
+    assert retry_delay_seconds("no delay here") is None
+
+
+async def test_daily_quota_is_remembered_and_the_model_skipped(test_settings: Settings) -> None:
+    """After a per-day 429 the model is skipped for later calls - no wasted requests."""
+    fake = FakeGemini(quota_error("Day"), fake_gemini_response("first"), fake_gemini_response("second"))
+    client = LLMClient(gemini_settings(test_settings, llm_fallback_model="gemini-3.6-flash"), client=fake)
+
+    assert await client.text(stage="s", system="s", messages=[{"role": "user", "content": "1"}]) == "first"
+    assert await client.text(stage="s", system="s", messages=[{"role": "user", "content": "2"}]) == "second"
+
+    assert [request["model"] for request in fake.requests] == ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.6-flash"]
+    assert QUOTAS.is_exhausted("gemini-3.8-flash")
+    assert not QUOTAS.is_exhausted("gemini-3.6-flash")
+
+
+async def test_quota_memory_is_shared_between_clients(test_settings: Settings) -> None:
+    """A new client (e.g. the next evaluation question) also skips the exhausted model."""
+    settings = gemini_settings(test_settings, llm_fallback_model="gemini-3.6-flash")
+    await LLMClient(settings, client=FakeGemini(quota_error("Day"), fake_gemini_response("a"))).text(
+        stage="s", system="s", messages=[{"role": "user", "content": "q"}]
+    )
+    fresh = FakeGemini(fake_gemini_response("b"))
+
+    await LLMClient(settings, client=fresh).text(stage="s", system="s", messages=[{"role": "user", "content": "q"}])
+
+    assert [request["model"] for request in fresh.requests] == ["gemini-3.6-flash"]
+
+
+async def test_when_all_models_are_busy_the_client_waits_for_the_retry_delay(
+    test_settings: Settings, recorded_sleeps: list[float]
+) -> None:
+    """Every model rate limited -> wait the shortest retryDelay, then the next round succeeds."""
+    fake = FakeGemini(quota_error("Minute", "9s"), quota_error("Minute", "7s"), fake_gemini_response("done"))
+    client = LLMClient(gemini_settings(test_settings, llm_fallback_model="gemini-3.6-flash"), client=fake)
+
+    assert await client.text(stage="s", system="s", messages=[{"role": "user", "content": "q"}]) == "done"
+    assert recorded_sleeps == [7.0]
+    assert [request["model"] for request in fake.requests] == ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.8-flash"]
+
+
+async def test_all_daily_quotas_used_up_gives_a_clear_message(test_settings: Settings) -> None:
+    """When every model is out of quota for the day, the error says so and when it resets."""
+    fake = FakeGemini(quota_error("Day"))
+    client = LLMClient(gemini_settings(test_settings, llm_fallback_model="gemini-3.6-flash"), client=fake)
+
+    with pytest.raises(LLMUnavailableError, match="used up its free daily quota.*midnight Pacific"):
+        await client.text(stage="s", system="s", messages=[{"role": "user", "content": "q"}])
+    assert len(fake.requests) == 2  # each model tried once, then no more wasted requests
 
 
 def test_real_gemini_client_is_built_with_retries(test_settings: Settings) -> None:

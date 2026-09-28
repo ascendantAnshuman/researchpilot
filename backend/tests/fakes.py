@@ -228,7 +228,8 @@ class _FakeMessages:
 
     def stream(self, **kwargs: Any) -> _FakeStream:
         self._owner.requests.append({"endpoint": self._endpoint, **kwargs})
-        return _FakeStream(self._owner.outcomes.pop(0))
+        outcomes = self._owner.outcomes
+        return _FakeStream(outcomes.pop(0) if len(outcomes) > 1 else outcomes[0])  # the last outcome repeats
 
 
 def fake_gemini_response(
@@ -268,7 +269,7 @@ class FakeGemini:
 
     async def _generate(self, *, model: str, contents: Any, config: Any) -> Any:
         self.requests.append({"model": model, "contents": contents, "config": config})
-        outcome = self.outcomes.pop(0)
+        outcome = self.outcomes.pop(0) if len(self.outcomes) > 1 else self.outcomes[0]  # the last outcome repeats
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome

@@ -23,9 +23,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+import threading
 import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal, Protocol, TypeVar
 
 import anthropic
@@ -34,6 +37,7 @@ import pydantic
 from pydantic import BaseModel
 
 from app.config import Effort, Settings, get_settings
+from app.services import http_utils
 from app.services.http_utils import RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -76,8 +80,71 @@ _BASIC_EFFORT_MODELS = ("claude-opus-4-5",)
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 FALLBACK_MODELS: frozenset[str] = frozenset({"claude-opus-5", "claude-fable-5-1"})
 
-GEMINI_RETRY_STATUS_CODES = [408, 429, 500, 502, 503, 504]
+# 429 is deliberately absent: quota errors are handled below (skip the model, or switch to another one).
+GEMINI_RETRY_STATUS_CODES = [408, 500, 502, 503, 504]
 GEMINI_REFUSAL_REASONS = frozenset({"SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "RECITATION"})
+_RETRY_DELAY_RE = re.compile(r"retryDelay['\"]?\s*:\s*['\"]?(\d+(?:\.\d+)?)s")
+MAX_FAILOVER_ROUNDS = 3
+MAX_RATE_LIMIT_WAIT_SECONDS = 60.0
+
+
+# ---------------------------------------------------------------------------
+# Quota and pacing state shared by every client in the process
+# ---------------------------------------------------------------------------
+
+
+class QuotaRegistry:
+    """Remembers which models have used up their daily quota, so later calls skip them straight away."""
+
+    def __init__(self) -> None:
+        """Start with no exhausted models."""
+        self._exhausted: dict[str, date] = {}
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def quota_day() -> date:
+        """The current quota day. Free-tier quotas reset at midnight Pacific time (UTC-8 is used, never early)."""
+        return (datetime.now(UTC) - timedelta(hours=8)).date()
+
+    def mark_exhausted(self, model: str) -> None:
+        """Record that ``model`` cannot be used again until the next quota day."""
+        with self._lock:
+            self._exhausted[model] = self.quota_day()
+
+    def is_exhausted(self, model: str) -> bool:
+        """Whether ``model`` already used up today's quota."""
+        return self._exhausted.get(model) == self.quota_day()
+
+    def reset(self) -> None:
+        """Forget everything (used by tests)."""
+        with self._lock:
+            self._exhausted.clear()
+
+
+QUOTAS = QuotaRegistry()
+_LIMITERS: dict[tuple[str, int], RateLimiter] = {}
+_LIMITERS_LOCK = threading.Lock()
+
+
+def limiter_for(model: str, requests_per_minute: int) -> RateLimiter | None:
+    """The process-wide pacing limiter for one model (None when unlimited)."""
+    if requests_per_minute <= 0:
+        return None
+    with _LIMITERS_LOCK:
+        return _LIMITERS.setdefault((model, requests_per_minute), RateLimiter(60.0 / requests_per_minute))
+
+
+def reset_llm_state() -> None:
+    """Clear quota memory and pacing limiters (used by tests)."""
+    QUOTAS.reset()
+    with _LIMITERS_LOCK:
+        _LIMITERS.clear()
+
+
+def retry_delay_seconds(error_text: str) -> float | None:
+    """The ``retryDelay`` a Gemini 429 error asks for, in seconds."""
+    match = _RETRY_DELAY_RE.search(error_text)
+    return float(match.group(1)) if match else None
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +162,19 @@ class LLMConfigurationError(LLMError):
 
 class LLMUnavailableError(LLMError):
     """Rate limits, overload or network problems persisted after all retries."""
+
+
+class LLMRateLimitedError(LLMUnavailableError):
+    """A per-minute limit was hit; ``retry_after`` says when the model accepts requests again."""
+
+    def __init__(self, message: str, retry_after: float = 15.0) -> None:
+        """Remember how long to wait before this model can be used again."""
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+class LLMQuotaExhaustedError(LLMUnavailableError):
+    """The model's daily quota is used up (free tiers reset around midnight Pacific time)."""
 
 
 class LLMRefusalError(LLMError):
@@ -413,7 +493,12 @@ class _GeminiBackend:
         """The ``GenerateContentConfig`` for a request."""
         from google.genai import types
 
-        config: dict[str, Any] = {"system_instruction": system, "max_output_tokens": max_tokens}
+        config: dict[str, Any] = {
+            "system_instruction": system,
+            "max_output_tokens": max_tokens,
+            # No tools are passed, so the SDK's automatic function calling is switched off explicitly.
+            "automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True),
+        }
         level = gemini_thinking_level(self.model, effort)
         if level is not None:
             config["thinking_config"] = types.ThinkingConfig(thinking_level=level)
@@ -444,9 +529,12 @@ class _GeminiBackend:
             code = getattr(exc, "code", None)
             text = str(exc)
             if code == 429:
-                raise LLMUnavailableError(
-                    f"{stage}: Gemini free-tier rate limit reached (per minute or per day). Wait and retry, lower "
-                    "LLM_REQUESTS_PER_MINUTE, or switch LLM_MODEL to a Flash-Lite model."
+                if "PerDay" in text:
+                    raise LLMQuotaExhaustedError(
+                        f"{stage}: {self.model} has used up its free daily quota (resets at midnight Pacific time)"
+                    ) from exc
+                raise LLMRateLimitedError(
+                    f"{stage}: {self.model} hit its free-tier per-minute limit", retry_after=retry_delay_seconds(text) or 15.0
                 ) from exc
             if code in (401, 403) or "API_KEY_INVALID" in text or "API key not valid" in text:
                 raise LLMConfigurationError("GEMINI_API_KEY was rejected - check the key in .env") from exc
@@ -564,12 +652,25 @@ class LLMClient:
         self._prices = model_prices(self.model, self.settings)
         if self._prices is None:
             logger.warning("No price known for model %s: cost will be reported as $0", self.model)
-        self._backend: _Backend = (
-            _GeminiBackend(self.settings, client) if self.provider == "gemini" else _AnthropicBackend(self.settings, client)
-        )
-        rpm = self.settings.llm_requests_per_minute
-        self._rate_limiter = RateLimiter(60.0 / rpm) if rpm > 0 else None
+        backend_class = _GeminiBackend if self.provider == "gemini" else _AnthropicBackend
+        self._backend: _Backend = backend_class(self.settings, client)
+        # The main model first, then LLM_FALLBACK_MODEL entries of the same provider, tried in order when a
+        # model is overloaded, rate limited or out of daily quota.
+        self._backends: list[_Backend] = [self._backend]
+        for fallback in self.settings.llm_fallback_models:
+            if fallback in {backend.model for backend in self._backends}:
+                continue
+            fallback_settings = self.settings.model_copy(update={"llm_model": fallback})
+            if fallback_settings.llm_provider != self.provider:
+                logger.warning("Fallback model %s uses a different provider than %s; ignoring it", fallback, self.model)
+                continue
+            self._backends.append(backend_class(fallback_settings, self._backend.client))
         self._semaphore: asyncio.Semaphore | None = None
+
+    @property
+    def models(self) -> list[str]:
+        """The main model followed by its fallbacks, in the order they are tried."""
+        return [backend.model for backend in self._backends]
 
     @property
     def uses_refusal_fallback(self) -> bool:
@@ -634,18 +735,17 @@ class LLMClient:
         if self._semaphore is None:
             self._semaphore = asyncio.Semaphore(self.settings.llm_max_concurrency)
         limit = max_tokens or self.settings.llm_max_tokens
+        request: dict[str, Any] = {
+            "stage": stage,
+            "system": system,
+            "messages": messages,
+            "effort": effort or self.settings.llm_effort,
+            "max_tokens": limit,
+            "output_model": output_model,
+        }
         async with self._semaphore:
-            if self._rate_limiter is not None:
-                await self._rate_limiter.wait()
             started = time.perf_counter()
-            completion = await self._backend.complete(
-                stage=stage,
-                system=system,
-                messages=messages,
-                effort=effort or self.settings.llm_effort,
-                max_tokens=limit,
-                output_model=output_model,
-            )
+            completion = await self._complete_with_failover(stage, request)
             elapsed = time.perf_counter() - started
 
         cost = compute_cost(
@@ -682,3 +782,46 @@ class LLMClient:
         if completion.stop == "max_tokens":
             raise LLMOutputError(f"{stage}: the answer was cut off at LLM_MAX_TOKENS={limit}; raise it in .env")
         return completion
+
+    async def _complete_with_failover(self, stage: str, request: dict[str, Any]) -> Completion:
+        """Try the models in order, skipping exhausted ones, until one answers.
+
+        * Daily quota used up -> remember it (process-wide) and move to the next model.
+        * Per-minute limit or overload -> move to the next model; if every model is
+          busy, wait for the shortest ``retryDelay`` and try another round.
+
+        Raises:
+            LLMUnavailableError: If no model answered within ``MAX_FAILOVER_ROUNDS`` rounds,
+                or every model's daily quota is used up.
+        """
+        last_error: LLMUnavailableError | None = None
+        for round_number in range(1, MAX_FAILOVER_ROUNDS + 1):
+            available = [backend for backend in self._backends if not QUOTAS.is_exhausted(backend.model)]
+            if not available:
+                raise LLMUnavailableError(
+                    f"{stage}: every configured model ({', '.join(self.models)}) has used up its free daily quota. "
+                    "Quotas reset at midnight Pacific time; add more models to LLM_FALLBACK_MODEL or continue tomorrow."
+                )
+            waits: list[float] = []
+            for backend in available:
+                limiter = limiter_for(backend.model, self.settings.llm_requests_per_minute)
+                if limiter is not None:
+                    await limiter.wait()
+                try:
+                    return await backend.complete(**request)
+                except LLMQuotaExhaustedError as exc:
+                    QUOTAS.mark_exhausted(backend.model)
+                    logger.warning("%s: %s used up its daily quota; switching model", stage, backend.model)
+                    last_error = exc
+                except LLMRateLimitedError as exc:
+                    logger.info("%s: %s is rate limited (retry in %.0fs); trying the next model", stage,
+                                backend.model, exc.retry_after)
+                    waits.append(exc.retry_after)
+                    last_error = exc
+                except LLMUnavailableError as exc:
+                    logger.warning("%s: %s unavailable (%s); trying the next model", stage, backend.model, exc)
+                    waits.append(5.0 * round_number)
+                    last_error = exc
+            if round_number < MAX_FAILOVER_ROUNDS and waits:
+                await http_utils._sleep(min(max(min(waits), 1.0), MAX_RATE_LIMIT_WAIT_SECONDS))
+        raise LLMUnavailableError(f"{stage}: no model could answer after {MAX_FAILOVER_ROUNDS} rounds ({last_error})")

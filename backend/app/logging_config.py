@@ -17,6 +17,7 @@ HANDLER_NAME = "researchpilot"
 NOISY_LOGGERS: tuple[str, ...] = (
     "anthropic",
     "chromadb",
+    "google_genai",
     "httpcore",
     "httpx",
     "huggingface_hub",

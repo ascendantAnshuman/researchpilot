@@ -37,6 +37,7 @@ MIN_PRODUCTION_SECRET_LENGTH = 32
 _OPTIONAL_FIELDS: tuple[str, ...] = (
     "anthropic_api_key",
     "gemini_api_key",
+    "llm_fallback_model",
     "semantic_scholar_api_key",
     "jwt_secret_key",
     "database_url",
@@ -78,6 +79,7 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr | None = None
     gemini_api_key: SecretStr | None = None
     llm_model: str = "claude-opus-5"
+    llm_fallback_model: str | None = None
     llm_requests_per_minute: int = Field(default=0, ge=0, le=10000)
     llm_effort: Effort = "high"
     llm_max_tokens: int = Field(default=32000, ge=256, le=128000)
@@ -191,6 +193,12 @@ class Settings(BaseSettings):
     def pdf_cache_dir(self) -> Path:
         """Directory where downloaded paper PDFs are cached."""
         return self.data_dir / "pdfs"
+
+    @property
+    def llm_fallback_models(self) -> list[str]:
+        """``LLM_FALLBACK_MODEL`` as a list (comma-separated), without the main model or duplicates."""
+        models = [model.strip() for model in (self.llm_fallback_model or "").split(",") if model.strip()]
+        return [model for model in dict.fromkeys(models) if model != self.llm_model]
 
     @property
     def llm_provider(self) -> Literal["anthropic", "gemini"]:

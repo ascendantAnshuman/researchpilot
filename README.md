@@ -70,7 +70,7 @@ flowchart LR
 | Frontend | Next.js 14 (App Router), React 18, TypeScript, Tailwind CSS, dark mode |
 | Export | Markdown and PDF (ReportLab) |
 | Ops | Docker, docker-compose; Vercel (frontend) + Railway/Render (backend) |
-| Quality | 338 backend tests (pytest), 30 frontend tests (Vitest), ESLint, strict TypeScript |
+| Quality | 347 backend tests (pytest), 30 frontend tests (Vitest), ESLint, strict TypeScript |
 
 ## Project structure
 
@@ -158,7 +158,8 @@ All settings live in `.env` (see [.env.example](.env.example) for every option w
 |---|---|---|
 | `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` | – | Key for the provider of `LLM_MODEL`; required for research, chat and evaluation. |
 | `LLM_MODEL` | `gemini-3.8-flash` (in `.env.example`) | Model used by every agent. `gemini-*` uses Google's free tier; `claude-*` uses paid Anthropic models (e.g. `claude-opus-5`, or `claude-sonnet-5` at ~40% of its price). |
-| `LLM_REQUESTS_PER_MINUTE` | `8` (in `.env.example`) | Spaces out model calls to stay under free-tier per-minute limits (`0` = unlimited). |
+| `LLM_FALLBACK_MODEL` | seven free Gemini models (in `.env.example`) | Comma-separated models tried in order when the main one is overloaded (HTTP 503), rate limited, or out of its daily free quota (HTTP 429). Exhausted models are skipped until the quota resets, so each model's separate free quota adds up. |
+| `LLM_REQUESTS_PER_MINUTE` | `5` (in `.env.example`) | Paces calls per model to stay under free-tier per-minute limits (`0` = unlimited). |
 | `LLM_EFFORT` | `high` | Reasoning effort (`low` … `max`); simple extraction calls automatically use at most `medium`. |
 | `JWT_SECRET_KEY` | random per process | Set it, or logins reset on every restart. Required in production. |
 | `SEMANTIC_SCHOLAR_API_KEY` | – | Without it Semantic Scholar is often rate-limited, and searches fall back to arXiv only. |
@@ -212,7 +213,7 @@ costs one full pipeline run plus judging, so start with `--limit 2` and check th
 ## Testing
 
 ```powershell
-cd backend;  pytest                                              # 338 offline tests
+cd backend;  pytest                                              # 347 offline tests
 cd backend;  $env:RP_RUN_INTEGRATION="1"; pytest -m integration  # live arXiv / Semantic Scholar / PDF / model tests
 cd frontend; npm test; npm run lint; npm run typecheck; npm run build
 ```

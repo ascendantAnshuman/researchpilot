@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session  # noqa: E402
 
 from app.config import Settings, get_settings  # noqa: E402
 from app.db import create_tables, dispose_engine, get_session_factory, init_engine  # noqa: E402
+from app.llm import reset_llm_state  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.services.vector_store import VectorStore  # noqa: E402
 from tests.api_harness import Api, build_api  # noqa: E402
@@ -31,6 +32,14 @@ from tests.fakes import HashingEmbedder  # noqa: E402
 
 TEST_JWT_SECRET = "test-only-jwt-secret-that-is-long-enough-0123456789"
 TEST_PASSWORD = "CorrectHorse42"
+
+
+@pytest.fixture(autouse=True)
+def _fresh_llm_state() -> Iterator[None]:
+    """Each test starts with no remembered model quotas or pacing limiters."""
+    reset_llm_state()
+    yield
+    reset_llm_state()
 
 
 @pytest.fixture()

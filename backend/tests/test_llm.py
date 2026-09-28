@@ -233,7 +233,9 @@ async def test_missing_parsed_output_raises_output_error(test_settings: Settings
         ),
     ],
 )
-async def test_sdk_errors_are_translated(test_settings: Settings, error: Exception, expected: type[Exception]) -> None:
+async def test_sdk_errors_are_translated(
+    test_settings: Settings, error: Exception, expected: type[Exception], recorded_sleeps: list[float]
+) -> None:
     """SDK exceptions become the pipeline's own error types (after the SDK's own retries)."""
     client = LLMClient(settings_for(test_settings, "claude-opus-5"), client=FakeAnthropic(error))
 
