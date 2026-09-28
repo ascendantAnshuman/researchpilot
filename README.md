@@ -46,8 +46,10 @@ flowchart LR
 
 ## Screenshots
 
-> These were captured from an end-to-end browser test of the real UI running against the **offline demo pipeline**
-> (mocked language model), so the report text is sample data. Replace them with screenshots of a real run for your report.
+> A real run on the free Gemini tier: the question *"What are recent methods for reducing hallucination in
+> retrieval-augmented generation systems?"*, 8 arXiv papers read in full, 17 minutes, $0.00. The Critic checked 38 claims
+> in the first draft (27 supported, 10 unsupported); after one revision 33 of 37 were supported (89%) and the 3 still
+> unsupported were removed. Semantic Scholar rate-limits requests without an API key, so this run used arXiv only.
 
 | Dashboard | Live agent progress |
 |---|---|
@@ -70,7 +72,7 @@ flowchart LR
 | Frontend | Next.js 14 (App Router), React 18, TypeScript, Tailwind CSS, dark mode |
 | Export | Markdown and PDF (ReportLab) |
 | Ops | Docker, docker-compose; Vercel (frontend) + Railway/Render (backend) |
-| Quality | 347 backend tests (pytest), 30 frontend tests (Vitest), ESLint, strict TypeScript |
+| Quality | 352 backend tests (pytest), 30 frontend tests (Vitest), ESLint, strict TypeScript |
 
 ## Project structure
 
@@ -97,7 +99,7 @@ researchpilot/
 │   ├── src/lib/               API client, SSE parser, progress/citation helpers (+ Vitest tests)
 │   └── Dockerfile
 ├── eval/                      25 benchmark questions, judges, paired Critic ablation, run_eval CLI
-├── docs/                      architecture.md, deployment.md, screenshots/, report/viva material
+├── docs/                      architecture.md, deployment.md, sample_report.md, screenshots/, report/viva material
 ├── docker-compose.yml, render.yaml, .env.example
 └── README.md
 ```
@@ -158,7 +160,7 @@ All settings live in `.env` (see [.env.example](.env.example) for every option w
 |---|---|---|
 | `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` | – | Key for the provider of `LLM_MODEL`; required for research, chat and evaluation. |
 | `LLM_MODEL` | `gemini-3.8-flash` (in `.env.example`) | Model used by every agent. `gemini-*` uses Google's free tier; `claude-*` uses paid Anthropic models (e.g. `claude-opus-5`, or `claude-sonnet-5` at ~40% of its price). |
-| `LLM_FALLBACK_MODEL` | seven free Gemini models (in `.env.example`) | Comma-separated models tried in order when the main one is overloaded (HTTP 503), rate limited, or out of its daily free quota (HTTP 429). Exhausted models are skipped until the quota resets, so each model's separate free quota adds up. |
+| `LLM_FALLBACK_MODEL` | seven free Gemini models + Gemma (in `.env.example`) | Comma-separated models tried in order when the main one is overloaded (HTTP 503), rate limited, or out of its daily free quota (HTTP 429). Exhausted models are skipped until the quota resets, so each model's separate free quota adds up. |
 | `LLM_REQUESTS_PER_MINUTE` | `5` (in `.env.example`) | Paces calls per model to stay under free-tier per-minute limits (`0` = unlimited). |
 | `LLM_EFFORT` | `high` | Reasoning effort (`low` … `max`); simple extraction calls automatically use at most `medium`. |
 | `JWT_SECRET_KEY` | random per process | Set it, or logins reset on every restart. Required in production. |
@@ -213,7 +215,7 @@ costs one full pipeline run plus judging, so start with `--limit 2` and check th
 ## Testing
 
 ```powershell
-cd backend;  pytest                                              # 347 offline tests
+cd backend;  pytest                                              # 352 offline tests
 cd backend;  $env:RP_RUN_INTEGRATION="1"; pytest -m integration  # live arXiv / Semantic Scholar / PDF / model tests
 cd frontend; npm test; npm run lint; npm run typecheck; npm run build
 ```

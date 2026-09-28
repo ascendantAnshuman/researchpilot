@@ -243,6 +243,12 @@ async def test_sdk_errors_are_translated(
         await client.structured(stage="planner", system="s", messages=[], output_model=Answer)
 
 
+def test_missing_anthropic_key_is_a_configuration_error(test_settings: Settings) -> None:
+    """A Claude model without ANTHROPIC_API_KEY fails fast with a clear message (not a raw SDK TypeError)."""
+    with pytest.raises(LLMConfigurationError, match="ANTHROPIC_API_KEY"):
+        LLMClient(settings_for(test_settings, "claude-opus-5"))
+
+
 def test_real_client_is_built_from_settings(test_settings: Settings) -> None:
     """Without an injected client, an AsyncAnthropic with the configured retries is created."""
     keyed = test_settings.model_copy(update={"anthropic_api_key": SecretStr("sk-ant-test"), "llm_max_retries": 4})

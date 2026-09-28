@@ -36,7 +36,7 @@ import httpx
 import pydantic
 from pydantic import BaseModel
 
-from app.config import Effort, Settings, get_settings
+from app.config import GOOGLE_MODEL_PREFIXES, Effort, Settings, get_settings
 from app.services import http_utils
 from app.services.http_utils import RateLimiter
 
@@ -222,7 +222,7 @@ def model_prices(model: str, settings: Settings) -> tuple[float, float] | None:
     """USD per million (input, output) tokens: ``.env`` overrides, else free for Gemini, else the Claude table."""
     if settings.llm_input_cost_per_mtok is not None and settings.llm_output_cost_per_mtok is not None:
         return settings.llm_input_cost_per_mtok, settings.llm_output_cost_per_mtok
-    if model.startswith("gemini"):
+    if model.startswith(GOOGLE_MODEL_PREFIXES):
         return FREE_TIER_PRICES
     for family in sorted(MODEL_PRICES, key=len, reverse=True):
         if model == family or model.startswith(f"{family}-"):
@@ -358,6 +358,8 @@ class _AnthropicBackend:
             self.client = client
             return
         key = settings.anthropic_api_key
+        if key is None or not key.get_secret_value().strip():
+            raise LLMConfigurationError("No Anthropic API key found. Set ANTHROPIC_API_KEY in the .env file.")
         try:
             self.client = anthropic.AsyncAnthropic(
                 api_key=key.get_secret_value() if key else None,

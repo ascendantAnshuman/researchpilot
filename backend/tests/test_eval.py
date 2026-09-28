@@ -33,6 +33,7 @@ from eval.metrics import ArmResult, EvalRun, QuestionResult, render_markdown, su
 
 from app.agents.state import ClaimList, JudgementList, PipelineContext  # noqa: E402
 from app.config import Settings  # noqa: E402
+from app.llm import QUOTAS, LLMUnavailableError  # noqa: E402
 from app.services.vector_store import VectorStore  # noqa: E402
 from tests.builders import FALSE_SENTENCE_START, claims_handler, judgement_handler, make_context  # noqa: E402
 from tests.fakes import FakeLLM, prompt_text  # noqa: E402
@@ -246,6 +247,48 @@ def test_cli_writes_results_and_resumes(offline_eval: None, tmp_path: Path) -> N
 
     assert run_eval.main(["--limit", "2", "--yes", "--resume", "--output-dir", str(tmp_path)]) == 0
     assert len(json.loads((tmp_path / "results.json").read_text(encoding="utf-8"))["questions"]) == 2
+
+
+def test_incomplete_questions_are_marked_for_resume(
+    offline_eval: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If a judge call fails (e.g. quota ran out), the question is an error so --resume redoes it."""
+    failing_judge = judge_llm()
+    failing_judge.handlers[CitationVerdictList] = lambda call: LLMUnavailableError("every configured model used up")
+    monkeypatch.setattr(run_eval, "make_judge_llm", lambda settings: failing_judge)
+
+    assert run_eval.main(["--limit", "1", "--yes", "--output-dir", str(tmp_path)]) == 0
+
+    question = json.loads((tmp_path / "results.json").read_text(encoding="utf-8"))["questions"][0]
+    assert question["error"].startswith("Incomplete")
+    assert "citation judge failed" in question["error"]
+
+
+def test_evaluation_stops_when_every_model_is_out_of_quota(
+    offline_eval: None, tmp_path: Path, keyed_settings: Settings
+) -> None:
+    """Once the whole model pool is exhausted for the day, the runner stops instead of failing every question."""
+    QUOTAS.mark_exhausted(keyed_settings.llm_model)
+
+    assert run_eval.main(["--limit", "3", "--yes", "--output-dir", str(tmp_path)]) == 0
+
+    assert len(json.loads((tmp_path / "results.json").read_text(encoding="utf-8"))["questions"]) == 1
+
+
+def test_no_fallback_records_a_single_model(
+    offline_eval: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--no-fallback removes the model pool, and the saved settings show exactly which models were used."""
+    monkeypatch.setenv("LLM_FALLBACK_MODEL", "gemini-3.6-flash")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    assert run_eval.main(["--limit", "1", "--yes", "--no-fallback", "--pipeline-model", "claude-sonnet-5",
+                          "--output-dir", str(tmp_path)]) == 0
+
+    data = json.loads((tmp_path / "results.json").read_text(encoding="utf-8"))
+    assert data["pipeline_model"] == "claude-sonnet-5"
+    assert data["settings"]["llm_fallback_models"] == []
 
 
 def test_cli_selects_questions_by_id(offline_eval: None, tmp_path: Path) -> None:

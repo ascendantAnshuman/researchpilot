@@ -65,6 +65,16 @@ def test_provider_is_chosen_from_the_model_name(test_settings: Settings) -> None
     assert test_settings.model_copy(update={"llm_model": "gemini-3.8-flash"}).llm_configured is False
 
 
+def test_gemma_models_are_served_by_the_gemini_api(test_settings: Settings) -> None:
+    """Google's open Gemma models use the same API, key and free pricing as Gemini."""
+    gemma = gemini_settings(test_settings, model="gemma-4-31b-it")
+
+    assert (gemma.llm_provider, gemma.llm_key_name) == ("gemini", "GEMINI_API_KEY")
+    assert model_prices("gemma-4-31b-it", gemma) == (0.0, 0.0)
+    assert gemini_thinking_level("gemma-4-31b-it", "high") is None
+    assert LLMClient(gemma, client=FakeGemini()).provider == "gemini"
+
+
 def test_gemini_free_tier_costs_nothing(test_settings: Settings) -> None:
     """Gemini usage is priced at $0 unless paid-tier prices are configured."""
     assert model_prices("gemini-3.8-flash", test_settings) == (0.0, 0.0)

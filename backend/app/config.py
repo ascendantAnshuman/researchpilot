@@ -33,6 +33,8 @@ LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 
 MIN_PRODUCTION_SECRET_LENGTH = 32
+# Model name prefixes served by Google's Gemini API (Gemini and the open Gemma models).
+GOOGLE_MODEL_PREFIXES: tuple[str, ...] = ("gemini", "gemma")
 
 _OPTIONAL_FIELDS: tuple[str, ...] = (
     "anthropic_api_key",
@@ -202,8 +204,8 @@ class Settings(BaseSettings):
 
     @property
     def llm_provider(self) -> Literal["anthropic", "gemini"]:
-        """Which API serves ``LLM_MODEL``: Gemini for ``gemini-*`` models, otherwise Anthropic."""
-        return "gemini" if self.llm_model.strip().lower().startswith("gemini") else "anthropic"
+        """Which API serves ``LLM_MODEL``: Google's Gemini API for ``gemini-*``/``gemma-*`` models, else Anthropic."""
+        return "gemini" if self.llm_model.strip().lower().startswith(GOOGLE_MODEL_PREFIXES) else "anthropic"
 
     @property
     def llm_key_name(self) -> str:

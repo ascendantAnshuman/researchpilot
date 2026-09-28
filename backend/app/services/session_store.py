@@ -37,6 +37,7 @@ def settings_snapshot(settings: Settings) -> dict[str, Any]:
     """The settings that shape a run, stored with it for reproducibility."""
     return {
         "llm_model": settings.llm_model,
+        "llm_fallback_models": settings.llm_fallback_models,
         "llm_effort": settings.llm_effort,
         "enable_critic": settings.enable_critic,
         "max_revisions": settings.max_revisions,

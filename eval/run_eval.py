@@ -29,11 +29,11 @@ from pydantic import BaseModel, TypeAdapter
 from eval import EVAL_DIR
 from app.agents.graph import open_pipeline_context
 from app.config import Settings, get_settings
-from app.llm import LLM, LLMClient, LLMConfigurationError, LLMError
+from app.llm import LLM, QUOTAS, LLMClient, LLMConfigurationError, LLMError
 from app.logging_config import setup_logging
 from app.schemas import ResearchReport
 from app.services.session_store import settings_snapshot
-from eval.ablation import run_paired
+from eval.ablation import PairedRun, run_paired
 from eval.judges import judge_citations, judge_faithfulness, judge_relevance
 from eval.metrics import ArmResult, EvalRun, QuestionResult, arm_result, render_markdown, summarize
 
@@ -90,8 +90,27 @@ async def evaluate_arm(report: ResearchReport, context: Any, judge: LLM, judge_s
     return arm_result(report, citations, faithfulness, relevance, notes)
 
 
+LLM_FAILURE_MARKERS: tuple[str, ...] = ("summary extraction failed", "Critic failed", "Revision failed", "judge failed")
+
+
+def pool_exhausted(*settings_list: Settings) -> bool:
+    """True when every model configured for the pipeline and the judges has used up today's quota."""
+    models = {model for settings in settings_list for model in (settings.llm_model, *settings.llm_fallback_models)}
+    return all(QUOTAS.is_exhausted(model) for model in models)
+
+
+def llm_failures(paired: PairedRun, arms: Sequence[ArmResult]) -> list[str]:
+    """Pipeline warnings or judge notes showing that some model call failed (so the data is incomplete)."""
+    texts = [*paired.with_critic.warnings, *(note for arm in arms for note in arm.notes)]
+    return [text for text in texts if any(marker in text for marker in LLM_FAILURE_MARKERS)]
+
+
 async def evaluate_question(item: Question, settings: Settings, judge_settings: Settings) -> QuestionResult:
-    """Run the paired pipeline for one question and judge both arms."""
+    """Run the paired pipeline for one question and judge both arms.
+
+    A question whose data is incomplete because a model call failed (typically the free daily quota
+    running out) is recorded as an error, so ``--resume`` evaluates it again later.
+    """
     result = QuestionResult(id=item.id, topic=item.topic, question=item.question)
     judge = make_judge_llm(judge_settings)
     try:
@@ -101,6 +120,9 @@ async def evaluate_question(item: Question, settings: Settings, judge_settings: 
             result.without_critic = await evaluate_arm(paired.without_critic, context, judge, judge_settings)
             if not paired.draft_available:
                 result.with_critic.notes.append("no review was produced (no usable papers)")
+            failures = llm_failures(paired, [result.with_critic, result.without_critic])
+            if failures:
+                result.error = f"Incomplete - some model calls failed, re-run with --resume: {failures[0][:200]}"
     except LLMConfigurationError:
         raise
     except Exception as error:  # One broken question must not stop a multi-hour evaluation.
@@ -130,6 +152,14 @@ async def run_all(
         result = await evaluate_question(item, settings, judge_settings)
         run.questions = [existing for existing in run.questions if existing.id != item.id] + [result]
         save(run, output_dir)
+        if pool_exhausted(settings, judge_settings):
+            logger.warning(
+                "Every configured model has used up today's free quota. Stopping after %d of %d question(s); "
+                "run the same command with --resume after midnight Pacific time to continue.",
+                index,
+                len(questions),
+            )
+            break
         if result.error:
             logger.warning("[%d/%d] %s failed: %s", index, len(questions), item.id, result.error)
         elif result.with_critic and result.without_critic:
@@ -155,8 +185,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=EVAL_DIR, help="Where results.json/results.md go.")
     parser.add_argument("--limit", type=int, help="Only evaluate the first N questions.")
     parser.add_argument("--ids", help="Comma-separated question ids to evaluate, e.g. q01,q05.")
-    parser.add_argument("--pipeline-model", help="Claude model for the pipeline (default: LLM_MODEL).")
-    parser.add_argument("--judge-model", help="Claude model for the judges (default: the pipeline model).")
+    parser.add_argument("--pipeline-model", help="Model for the pipeline (default: LLM_MODEL).")
+    parser.add_argument("--judge-model", help="Model for the judges (default: the pipeline model).")
+    parser.add_argument(
+        "--no-fallback",
+        action="store_true",
+        help="Ignore LLM_FALLBACK_MODEL so every call uses exactly the chosen models (consistent measurements).",
+    )
     parser.add_argument("--top-n", type=int, help="Papers per question (default: TOP_N_PAPERS).")
     parser.add_argument("--resume", action="store_true", help="Skip questions already completed in results.json.")
     parser.add_argument("--yes", action="store_true", help="Do not ask for confirmation before spending API credit.")
@@ -185,6 +220,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         overrides["llm_model"] = args.pipeline_model
     if args.top_n:
         overrides["top_n_papers"] = args.top_n
+    if args.no_fallback:
+        overrides["llm_fallback_model"] = None
     settings = base.model_copy(update=overrides) if overrides else base
     judge_settings = settings.model_copy(update={"llm_model": args.judge_model or settings.llm_model})
     setup_logging(settings.log_level)
